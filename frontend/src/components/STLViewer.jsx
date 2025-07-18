@@ -48,10 +48,11 @@ const STLViewer = ({ stlFile }) => {
           
           if (contours.length === 0) return;
 
-          const materialColor = isFallback ? 0x00ff00 : 0xff0000; // Green for fallback, Red for Clipper
+          // If isFallback is true, it means we are rendering raw segments (pairs of points)
+          // Otherwise, it implies ClipperLib successfully generated closed contours
+          const materialColor = isFallback ? 0x00ff00 : 0xff0000; // Green for fallback (raw segments), Red for Clipper (closed contours)
           const sliceMaterial = new THREE.LineBasicMaterial({ color: materialColor });
 
-          // Contours are flattened arrays of coordinates
           const sliceGeometry = new THREE.BufferGeometry();
           sliceGeometry.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(contours), 3));
 
@@ -61,9 +62,8 @@ const STLViewer = ({ stlFile }) => {
             sliceLine = new THREE.LineSegments(sliceGeometry, sliceMaterial);
           } else {
             // For Clipper contours, it's LineLoop (closed polygon)
-            // ClipperLib.PolyTreeToPaths usually returns closed paths, but for safety:
+            // Ensure the loop is closed by duplicating the first point if necessary
             const positions = sliceGeometry.attributes.position.array;
-            // Check if the first and last points are identical (within float precision)
             const firstPointX = positions[0];
             const firstPointY = positions[1];
             const firstPointZ = positions[2];
@@ -348,41 +348,43 @@ const STLViewer = ({ stlFile }) => {
     if (lines.length === 0) return console.log("No slices to export."); // Using console.log instead of alert()
 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-
     let svgPaths = "";
+
     lines.forEach((line) => {
       const pos = line.geometry.attributes.position;
-      let pathD = "";
-      for (let i = 0; i < pos.count; i++) {
-        const x = pos.getX(i);
-        const y = pos.getY(i);
-        const z = pos.getZ(i);
+      // Iterate through segments (pairs of points)
+      for (let i = 0; i < pos.count; i += 2) { // Increment by 2 for segments
+        const p1x = pos.getX(i);
+        const p1y = pos.getY(i);
+        const p1z = pos.getZ(i);
 
-        let px, py;
+        const p2x = pos.getX(i + 1);
+        const p2y = pos.getY(i + 1);
+        const p2z = pos.getZ(i + 1);
+
+        let px1, py1, px2, py2;
+
+        // Project 3D points to 2D plane based on slicingPlane
         if (slicingParams.slicingPlane === "Z") {
-          px = x;
-          py = y;
+          px1 = p1x; py1 = p1y;
+          px2 = p2x; py2 = p2y;
         } else if (slicingParams.slicingPlane === "X") {
-          px = z;
-          py = y;
-        } else {
-          px = x;
-          py = z;
+          px1 = p1z; py1 = p1y; // X-plane, so use Z and Y coordinates
+          px2 = p2z; py2 = p2y;
+        } else { // Y plane
+          px1 = p1x; py1 = p1z; // Y-plane, so use X and Z coordinates
+          px2 = p2x; py2 = p2z;
         }
 
-        minX = Math.min(minX, px);
-        minY = Math.min(minY, py);
-        maxX = Math.max(maxX, px);
-        maxY = Math.max(maxY, py);
+        minX = Math.min(minX, px1, px2);
+        minY = Math.min(minY, py1, py2);
+        maxX = Math.max(maxX, px1, px2);
+        maxY = Math.max(maxY, py1, py2);
 
-        pathD += i === 0 ? `M ${px.toFixed(3)} ${(-py).toFixed(3)}` : ` L ${px.toFixed(3)} ${(-py).toFixed(3)}`;
+        // Create a new path for each segment (M = moveto, L = lineto)
+        // Y-coordinates are inverted for SVG (positive Y is down)
+        svgPaths += `<path d="M ${px1.toFixed(3)} ${(-py1).toFixed(3)} L ${px2.toFixed(3)} ${(-py2).toFixed(3)}" stroke="#${line.material.color.getHexString()}" stroke-width="0.05" fill="none"/>`;
       }
-      if (line instanceof THREE.LineLoop) {
-        pathD += " Z";
-      }
-
-      const strokeColor = `#${line.material.color.getHexString()}`;
-      svgPaths += `<path d="${pathD}" stroke="${strokeColor}" stroke-width="0.05" fill="none"/>`;
     });
 
     const viewBoxString = `${minX.toFixed(3)} ${(-maxY).toFixed(3)} ${(maxX - minX).toFixed(3)} ${(maxY - minY).toFixed(3)}`;
@@ -406,38 +408,34 @@ ${svgPaths}
       const pos = line.geometry.attributes.position;
       const numPoints = pos.count; // Total number of points in the buffer
 
-      for (let i = 0; i < numPoints; i++) {
+      for (let i = 0; i < numPoints; i += 2) { // Iterate by 2 for start and end of each segment
         const p1x = pos.getX(i);
         const p1y = pos.getY(i);
         const p1z = pos.getZ(i);
 
-        let nextIndex;
-        if (line instanceof THREE.LineLoop) {
-          nextIndex = (i + 1) % numPoints;
-        } else {
-          if (i % 2 !== 0) continue;
-          nextIndex = i + 1;
-          if (nextIndex >= numPoints) continue;
-        }
+        // Ensure there's a second point for the segment
+        if (i + 1 >= numPoints) continue; 
         
-        const p2x = pos.getX(nextIndex);
-        const p2y = pos.getY(nextIndex);
-        const p2z = pos.getZ(nextIndex);
+        const p2x = pos.getX(i + 1);
+        const p2y = pos.getY(i + 1);
+        const p2z = pos.getZ(i + 1);
 
         let dx1, dy1, dz1;
         let dx2, dy2, dz2;
 
+        // Project 3D points to 2D plane for DXF
         if (slicingParams.slicingPlane === "Z") {
           dx1 = p1x; dy1 = p1y; dz1 = 0;
           dx2 = p2x; dy2 = p2y; dz2 = 0;
         } else if (slicingParams.slicingPlane === "X") {
-          dx1 = p1z; dy1 = p1y; dz1 = 0;
+          dx1 = p1z; dy1 = p1y; dz1 = 0; // X-plane, so use Z and Y coordinates
           dx2 = p2z; dy2 = p2y; dz2 = 0;
-        } else {
-          dx1 = p1x; dy1 = p1z; dz1 = 0;
+        } else { // Y plane
+          dx1 = p1x; dy1 = p1z; dz1 = 0; // Y-plane, so use X and Z coordinates
           dx2 = p2x; dy2 = p2z; dz2 = 0;
         }
 
+        // Add a LINE entity for each segment
         dxfContent +=
           `0\nLINE\n8\n0\n10\n${dx1.toFixed(3)}\n20\n${dy1.toFixed(3)}\n30\n${dz1.toFixed(3)}\n11\n${dx2.toFixed(3)}\n21\n${dy2.toFixed(3)}\n31\n${dz2.toFixed(3)}\n`;
       }
