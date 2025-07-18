@@ -19,7 +19,8 @@ const STLViewer = ({ stlFile }) => {
   const [slicingParams, setSlicingParams] = useState({
     sliceHeight: 2,
     showSlices: true,
-    currentSlice: 0,
+    currentLayerIndex: 0, // Changed to layer index
+    currentSliceValue: 0, // Actual coordinate value
     singleSliceMode: false,
     slicingPlane: "Z",
   });
@@ -96,7 +97,7 @@ const STLViewer = ({ stlFile }) => {
     // For performance, a single shared worker is often better for this kind of task.
     // However, if the worker needs to be reset or if multiple instances are needed,
     // you would manage its lifecycle within this useEffect.
-  }, [sceneState.scene]); // Dependency on sceneState.scene to ensure worker is ready
+  }, [sceneState.scene]);
 
 
   // Custom debounce hook for slicing parameters
@@ -117,6 +118,7 @@ const STLViewer = ({ stlFile }) => {
       ...p,
       sliceHeight: parseFloat(e.target.value),
       singleSliceMode: false,
+      currentLayerIndex: 0, // Reset layer index when height changes
     }));
   };
 
@@ -125,6 +127,7 @@ const STLViewer = ({ stlFile }) => {
       ...p,
       slicingPlane: e.target.value,
       singleSliceMode: false,
+      currentLayerIndex: 0, // Reset layer index when plane changes
     }));
   };
 
@@ -133,9 +136,14 @@ const STLViewer = ({ stlFile }) => {
   };
 
   const handleStepChange = (e) => {
+    const newLayerIndex = parseInt(e.target.value, 10);
+    // Calculate the actual slice coordinate based on the layer index
+    const calculatedSliceValue = minRangeValue + newLayerIndex * slicingParams.sliceHeight;
+
     setSlicingParams((p) => ({
       ...p,
-      currentSlice: parseFloat(e.target.value),
+      currentLayerIndex: newLayerIndex,
+      currentSliceValue: calculatedSliceValue, // Update the actual coordinate
       singleSliceMode: true,
       showSlices: true,
     }));
@@ -272,9 +280,15 @@ const STLViewer = ({ stlFile }) => {
         sceneState.controls.update();
       }
 
-      // Trigger slicing via worker after geometry is loaded
-      // The actual slicing logic will be triggered by the debouncedSlicingParams useEffect
-      // and sent to the worker.
+      // After loading new geometry, update currentSliceValue based on currentLayerIndex
+      // and trigger slicing.
+      const initialMinRangeValue = loadedGeometry.boundingBox.min[slicingParams.slicingPlane.toLowerCase()];
+      const initialCalculatedSliceValue = initialMinRangeValue + slicingParams.currentLayerIndex * slicingParams.sliceHeight;
+      setSlicingParams(prev => ({
+        ...prev,
+        currentSliceValue: initialCalculatedSliceValue,
+      }));
+
     },
     undefined,
     (error) => {
@@ -303,7 +317,7 @@ const STLViewer = ({ stlFile }) => {
       if (debouncedSlicingParams.showSlices) {
         let sliceValueToRender = null;
         if (debouncedSlicingParams.singleSliceMode) {
-          sliceValueToRender = debouncedSlicingParams.currentSlice;
+          sliceValueToRender = debouncedSlicingParams.currentSliceValue; // Use currentSliceValue
         }
 
         // Prepare data for the worker (transferable objects like Float32Array)
@@ -547,9 +561,8 @@ ${svgPaths}
     const range = maxRangeValue - minRangeValue;
     totalLayers = Math.floor(range / slicingParams.sliceHeight) + 1;
 
-    const clampedCurrentSlice = Math.max(minRangeValue, Math.min(maxRangeValue, slicingParams.currentSlice));
-    currentLayerIndex = Math.floor((clampedCurrentSlice - minRangeValue) / slicingParams.sliceHeight);
-    currentLayerIndex = Math.max(0, Math.min(totalLayers - 1, currentLayerIndex));
+    // Clamp currentLayerIndex to valid range
+    currentLayerIndex = Math.max(0, Math.min(totalLayers > 0 ? totalLayers - 1 : 0, slicingParams.currentLayerIndex));
 
     const size = new THREE.Vector3();
     geometry.boundingBox.getSize(size);
@@ -618,15 +631,15 @@ ${svgPaths}
           Slice Position:
           <input
             type="range"
-            min={minRangeValue}
-            max={maxRangeValue}
-            step="0.1"
-            value={slicingParams.currentSlice}
+            min={0} // Min is now 0 (first layer index)
+            max={totalLayers > 0 ? totalLayers - 1 : 0} // Max is total layers - 1
+            step="1" // Step by 1 for layer index
+            value={currentLayerIndex} // Use currentLayerIndex for the slider
             onChange={handleStepChange}
-            disabled={!geometry || !slicingParams.singleSliceMode}
+            disabled={!geometry || !slicingParams.singleSliceMode || totalLayers <= 1} // Disable if only 1 layer
             style={{ marginLeft: 5, width: 150 }}
           />
-          <span style={{ marginLeft: 5 }}>{slicingParams.currentSlice.toFixed(2)}</span>
+          <span style={{ marginLeft: 5 }}>{slicingParams.currentSliceValue.toFixed(2)}</span> {/* Display actual coordinate */}
         </label>
 
         {geometry && (
