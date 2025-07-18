@@ -12,12 +12,13 @@ const STLViewer = ({ stlFile }) => {
 
   // --- 3. Slicing Logic State ---
   const [slicingParams, setSlicingParams] = useState({
-    sliceHeight: 2,
-    showSlices: true,
-    currentSlice: 0,
-    stepThrough: false,
-    slicingPlane: "Z",
-  });
+  sliceHeight: 2,
+  showSlices: true,
+  currentSlicePos: 0,
+  stepThrough: false,
+  slicingPlane: "Z",
+  showOnlyCurrentSlice: false,
+});
 
   // --- 4. UI Controls Handlers ---
   const handleSliceHeightChange = (e) => {
@@ -109,13 +110,21 @@ const STLViewer = ({ stlFile }) => {
       // Clear previous slices & add new if enabled
       clearSlices(scene);
       if (slicingParams.showSlices) {
-        sliceSTL(
-          loadedGeometry,
-          scene,
-          slicingParams.sliceHeight,
-          slicingParams.stepThrough ? slicingParams.currentSlice : null,
-          slicingParams.slicingPlane
-        );
+  let singleSlice = null;
+  if (slicingParams.showOnlyCurrentSlice || slicingParams.stepThrough) {
+    singleSlice = slicingParams.currentSlicePos;
+  }
+
+  sliceSTL(
+    geom,
+    scene,
+    slicingParams.sliceHeight,
+    singleSlice,
+    slicingParams.slicingPlane
+  );
+}
+
+;
       }
     });
   }, [stlFile, sceneState, slicingParams]);
@@ -266,13 +275,20 @@ ${svgPaths}
         </label>
 
         <label style={{ marginLeft: 20 }}>
-          <input
-            type="checkbox"
-            checked={slicingParams.showSlices}
-            onChange={handleToggleSlices}
-          />
-          Show Slices
-        </label>
+  <input
+    type="checkbox"
+    checked={slicingParams.showOnlyCurrentSlice}
+    onChange={() =>
+      setSlicingParams((prev) => ({
+        ...prev,
+        showOnlyCurrentSlice: !prev.showOnlyCurrentSlice,
+        stepThrough: !prev.showOnlyCurrentSlice, // Enable slider if toggled
+      }))
+    }
+  />
+  Show Only Selected Slice
+</label>
+
 
         <label style={{ marginLeft: 20 }}>
           Plane:
