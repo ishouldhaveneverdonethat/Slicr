@@ -4,10 +4,14 @@ import { STLLoader } from "three-stdlib";
 import { OrbitControls } from "three-stdlib";
 import { saveAs } from "file-saver";
 
+// Define ClipperLib globally, as it's loaded via a script tag in index.html
+// This helps ESLint and TypeScript (if you were using it) understand its presence.
+// @ts-ignore
+const ClipperLib = window.ClipperLib;
+
 const STLViewer = ({ stlFile }) => {
   // --- 1. Model and Geometry State ---
   const mountRef = useRef(null);
-  // Added controls to state to ensure they are accessible for cleanup and updates
   const [sceneState, setSceneState] = useState({ scene: null, renderer: null, camera: null, controls: null });
   const [geometry, setGeometry] = useState(null);
 
@@ -16,9 +20,9 @@ const STLViewer = ({ stlFile }) => {
     sliceHeight: 2,
     showSlices: true,
     currentSlice: 0,
-    singleSliceMode: false, // Renamed for clarity and explicitly managed
+    singleSliceMode: false,
     slicingPlane: "Z",
-    slicingDisplayMode: 'rawSegments', // 'rawSegments' or 'angleSortedContours'
+    // slicingDisplayMode is no longer needed as ClipperLib will always produce clean contours
   });
 
   // --- 4. UI Controls Handlers ---
@@ -26,7 +30,7 @@ const STLViewer = ({ stlFile }) => {
     setSlicingParams((p) => ({
       ...p,
       sliceHeight: parseFloat(e.target.value),
-      singleSliceMode: false, // Turn off single slice mode when slice height is changed
+      singleSliceMode: false,
     }));
   };
 
@@ -34,7 +38,7 @@ const STLViewer = ({ stlFile }) => {
     setSlicingParams((p) => ({
       ...p,
       slicingPlane: e.target.value,
-      singleSliceMode: false, // Reset single slice mode when plane changes
+      singleSliceMode: false,
     }));
   };
 
@@ -43,12 +47,11 @@ const STLViewer = ({ stlFile }) => {
   };
 
   const handleStepChange = (e) => {
-    // When the slider is moved, activate singleSliceMode and update currentSlice
     setSlicingParams((p) => ({
       ...p,
       currentSlice: parseFloat(e.target.value),
-      singleSliceMode: true, // Ensure singleSliceMode is true when slider is used
-      showSlices: true, // Ensure slices are shown when stepping
+      singleSliceMode: true,
+      showSlices: true,
     }));
   };
 
@@ -56,50 +59,38 @@ const STLViewer = ({ stlFile }) => {
     setSlicingParams((p) => ({
       ...p,
       singleSliceMode: !p.singleSliceMode,
-      // When turning off single slice mode, it will naturally revert to showing all slices
-      // based on sliceHeight due to the useEffect dependency.
     }));
   };
-
-  const handleDisplayModeChange = (e) => {
-    setSlicingParams((p) => ({ ...p, slicingDisplayMode: e.target.value }));
-  };
-
 
   // --- 2. Scene Setup and Render ---
   useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return;
 
-    // Clear previous canvas if any (important for hot-reloading or re-mounting)
     while (mount.firstChild) {
       mount.removeChild(mount.firstChild);
     }
 
-    // Scene, camera, renderer
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x1a1a1a); // Slightly darker background
+    scene.background = new THREE.Color(0x1a1a1a);
 
     const camera = new THREE.PerspectiveCamera(75, mount.clientWidth / mount.clientHeight, 0.1, 1000);
     camera.position.set(0, 0, 100);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setPixelRatio(window.devicePixelRatio); // Improve rendering quality on high-DPI screens
+    renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     mount.appendChild(renderer.domElement);
 
-    // Controls
     const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true; // Smoother controls
+    controls.enableDamping = true;
     controls.dampingFactor = 0.05;
 
-    // Lights
     scene.add(new THREE.AmbientLight(0xffffff, 0.6));
     const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
     directionalLight.position.set(50, 50, 100).normalize();
     scene.add(directionalLight);
 
-    // Handle window resize
     const handleResize = () => {
       if (mount) {
         camera.aspect = mount.clientWidth / mount.clientHeight;
@@ -109,25 +100,21 @@ const STLViewer = ({ stlFile }) => {
     };
     window.addEventListener("resize", handleResize);
 
-    // Animate loop
     const animate = () => {
       requestAnimationFrame(animate);
-      controls.update(); // Only needed if damping is enabled
+      controls.update();
       renderer.render(scene, camera);
     };
     animate();
 
-    // Save scene, renderer, camera, and controls to state
     setSceneState({ scene, renderer, camera, controls });
 
-    // Cleanup function
     return () => {
       window.removeEventListener("resize", handleResize);
-      controls.dispose(); // Dispose controls
-      renderer.dispose(); // Dispose renderer resources
-      // Note: mount.removeChild(renderer.domElement) is handled by the initial while loop when component remounts
+      controls.dispose();
+      renderer.dispose();
     };
-  }, []); // Empty dependency array means this runs once on mount
+  }, []);
 
   // --- 1. STL Loader & Mesh Setup ---
   useEffect(() => {
@@ -136,65 +123,60 @@ const STLViewer = ({ stlFile }) => {
     const loader = new STLLoader();
     loader.load(stlFile, (loadedGeometry) => {
       loadedGeometry.computeBoundingBox();
-      setGeometry(loadedGeometry); // Store geometry in state for UI controls
+      setGeometry(loadedGeometry);
 
       const material = new THREE.MeshPhongMaterial({ color: 0x00aaff });
       const mesh = new THREE.Mesh(loadedGeometry, material);
 
-      // Center mesh
       const center = new THREE.Vector3();
       loadedGeometry.boundingBox.getCenter(center);
       mesh.position.sub(center);
       mesh.name = "stlMesh";
 
-      // Replace existing mesh
       const scene = sceneState.scene;
       const existing = scene.getObjectByName("stlMesh");
       if (existing) {
         scene.remove(existing);
-        if (existing.geometry) existing.geometry.dispose(); // Dispose old geometry
-        if (existing.material) existing.material.dispose(); // Dispose old material
+        if (existing.geometry) existing.geometry.dispose();
+        if (existing.material) existing.material.dispose();
       }
       scene.add(mesh);
 
-      // Reset camera position to view the new model
       if (sceneState.camera && sceneState.controls) {
         const size = new THREE.Vector3();
         loadedGeometry.boundingBox.getSize(size);
         const maxDim = Math.max(size.x, size.y, size.z);
         const fov = sceneState.camera.fov * (Math.PI / 180);
         let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
-        cameraZ *= 1.5; // Add some padding
-        // Position camera relative to the model's center
+        cameraZ *= 1.5;
         sceneState.camera.position.set(center.x, center.y, center.z + cameraZ);
-        sceneState.camera.lookAt(center); // Look at the model center
-        sceneState.controls.target.copy(center); // Update controls target to model center
-        sceneState.controls.update(); // Update controls after changing target
+        sceneState.camera.lookAt(center);
+        sceneState.controls.target.copy(center);
+        sceneState.controls.update();
       }
 
-      // Initial slicing (or clearing if showSlices is false)
-      clearSlices(scene); // Always clear previous slices
+      clearSlices(scene);
       if (slicingParams.showSlices) {
          let sliceValueToRender = null;
          if (slicingParams.singleSliceMode) {
            sliceValueToRender = slicingParams.currentSlice;
          }
-         // Call getSliceSegments, then render based on display mode
+         // Call getSliceSegments, then render using ClipperLib
          const segments = getSliceSegments(
            loadedGeometry,
            slicingParams.sliceHeight,
            sliceValueToRender,
            slicingParams.slicingPlane
          );
-         renderSlices(segments, scene, slicingParams.slicingDisplayMode, slicingParams.slicingPlane);
+         renderSlicesWithClipper(segments, scene, slicingParams.slicingPlane);
       }
     },
-    undefined, // onProgress callback - can be used for loading indicators
+    undefined,
     (error) => {
       console.error("Error loading STL file:", error);
       alert("Error loading STL file. Please check the file and try again.");
     });
-  }, [stlFile, sceneState.scene, sceneState.camera, sceneState.controls, slicingParams.singleSliceMode, slicingParams.currentSlice, slicingParams.sliceHeight, slicingParams.slicingPlane, slicingParams.showSlices, slicingParams.slicingDisplayMode]); // Added new dependency
+  }, [stlFile, sceneState.scene, sceneState.camera, sceneState.controls, slicingParams.singleSliceMode, slicingParams.currentSlice, slicingParams.sliceHeight, slicingParams.slicingPlane, slicingParams.showSlices]);
 
   // --- Re-slice when slicingParams change (if geometry exists) ---
   useEffect(() => {
@@ -205,21 +187,20 @@ const STLViewer = ({ stlFile }) => {
         if (slicingParams.singleSliceMode) {
           sliceValueToRender = slicingParams.currentSlice;
         }
-        // Call getSliceSegments, then render based on display mode
+        // Call getSliceSegments, then render using ClipperLib
         const segments = getSliceSegments(
           geometry,
           slicingParams.sliceHeight,
           sliceValueToRender,
           slicingParams.slicingPlane
         );
-        renderSlices(segments, sceneState.scene, slicingParams.slicingDisplayMode, slicingParams.slicingPlane);
+        renderSlicesWithClipper(segments, sceneState.scene, slicingParams.slicingPlane);
       }
     }
-  }, [slicingParams.sliceHeight, slicingParams.showSlices, slicingParams.currentSlice, slicingParams.singleSliceMode, slicingParams.slicingPlane, slicingParams.slicingDisplayMode, geometry, sceneState.scene]); // Added new dependency
+  }, [slicingParams.sliceHeight, slicingParams.showSlices, slicingParams.currentSlice, slicingParams.singleSliceMode, slicingParams.slicingPlane, geometry, sceneState.scene]);
 
   // --- 6. Utility Functions ---
   const clearSlices = (scene) => {
-    // Remove slices by name, and dispose their geometry and material
     const slices = scene.children.filter((child) => child.name === "sliceLine");
     slices.forEach((line) => {
       scene.remove(line);
@@ -236,16 +217,17 @@ const STLViewer = ({ stlFile }) => {
    * @param {number} heightStep The height between slices.
    * @param {number | null} currentSliceVal If not null, only slice at this specific value.
    * @param {'X' | 'Y' | 'Z'} plane The slicing plane (e.g., 'Z' for XY slices).
-   * @returns {Array<Array<THREE.Vector3>>} An array of arrays, where each inner array is [point1, point2] forming a segment.
+   * @returns {Array<{ value: number, segments: Array<Array<THREE.Vector3>> }>} An array of objects,
+   * each containing the slice plane value and its raw segments.
    */
   const getSliceSegments = (geometry, heightStep, currentSliceVal, plane) => {
     const pos = geometry.attributes.position;
     const bbox = geometry.boundingBox;
-    const allSliceSegments = []; // Will store segments for all slices
+    const slicesData = []; // Will store { value, segments } for each slice plane
 
     if (!bbox) {
       console.warn("Bounding box not computed for geometry. Cannot slice.");
-      return allSliceSegments;
+      return slicesData;
     }
 
     let axis;
@@ -311,71 +293,120 @@ const STLViewer = ({ stlFile }) => {
           segmentsForCurrentSlice.push(currentTriangleIntersectionPoints);
         }
       }
-      allSliceSegments.push(...segmentsForCurrentSlice); // Add segments of current slice to overall list
+      if (segmentsForCurrentSlice.length > 0) {
+        slicesData.push({ value: value, segments: segmentsForCurrentSlice });
+      }
     });
-    return allSliceSegments;
+    return slicesData;
   };
 
   /**
-   * renderSlices
-   * Renders the slice segments based on the chosen display mode.
-   * @param {Array<Array<THREE.Vector3>>} segments An array of segments, each segment is [point1, point2].
+   * renderSlicesWithClipper
+   * Renders the slice contours using js-clipper for robust polygon reconstruction.
+   * @param {Array<{ value: number, segments: Array<Array<THREE.Vector3>> }>} slicesData Data for each slice plane.
    * @param {THREE.Scene} scene The Three.js scene to add lines to.
-   * @param {'rawSegments' | 'angleSortedContours'} displayMode The mode to render slices.
-   * @param {'X' | 'Y' | 'Z'} plane The slicing plane, used for angle sorting projection.
+   * @param {'X' | 'Y' | 'Z'} plane The slicing plane, used for projection.
    */
-  const renderSlices = (segments, scene, displayMode, plane) => {
-    if (displayMode === 'rawSegments') {
-      segments.forEach(segment => {
-        const segmentGeometry = new THREE.BufferGeometry().setFromPoints(segment);
-        const segmentMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 });
-        const line = new THREE.LineSegments(segmentGeometry, segmentMaterial);
-        line.name = "sliceLine";
-        scene.add(line);
+  const renderSlicesWithClipper = (slicesData, scene, plane) => {
+    if (!ClipperLib) {
+      console.error("ClipperLib is not loaded. Please ensure clipper.min.js is included in your index.html.");
+      return;
+    }
+
+    const CL_SCALE = 100000; // Scale factor for ClipperLib (uses integers for precision)
+
+    slicesData.forEach(sliceData => {
+      const { value: slicePlaneValue, segments: rawSegments } = sliceData;
+
+      const clipper = new ClipperLib.Clipper();
+      const subjectPaths = new ClipperLib.Paths(); // Input paths for Clipper
+
+      rawSegments.forEach(segment => {
+        const p1 = segment[0];
+        const p2 = segment[1];
+
+        let x1, y1, x2, y2;
+
+        // Project 3D points to 2D based on slicing plane
+        if (plane === "Z") { // Project to XY plane
+          x1 = p1.x; y1 = p1.y;
+          x2 = p2.x; y2 = p2.y;
+        } else if (plane === "X") { // Project to YZ plane
+          x1 = p1.y; y1 = p1.z; // Y becomes X, Z becomes Y in 2D plane
+          x2 = p2.y; y2 = p2.z;
+        } else { // Y plane, project to XZ plane
+          x1 = p1.x; y1 = p1.z; // X becomes X, Z becomes Y in 2D plane
+          x2 = p2.x; y2 = p2.z;
+        }
+
+        // Scale up to integers for ClipperLib
+        const intP1 = { X: Math.round(x1 * CL_SCALE), Y: Math.round(y1 * CL_SCALE) };
+        const intP2 = { X: Math.round(x2 * CL_SCALE), Y: Math.round(y2 * CL_SCALE) };
+
+        // ClipperLib expects paths as an array of points. For segments, we add them as individual paths.
+        // ClipperLib.AddPath expects a single path, not a pair of points for a segment.
+        // To use Clipper for segment union, we need to treat each segment as a tiny path.
+        // A more direct way is to use PolyTree for the result.
+        // Let's create a path for each segment.
+        const path = new ClipperLib.Path();
+        path.push(intP1);
+        path.push(intP2);
+        subjectPaths.push(path);
       });
-    } else { // 'angleSortedContours' mode (attempts to form contours)
-      // This part still uses the angle sort and will produce "garbled" results for complex shapes.
-      // It's here to demonstrate the difference and the limitations of this approach.
 
-      // Collect all points from all segments for this (single or multiple) slice(s)
-      const allPointsForContouring = [];
-      segments.forEach(segment => {
-        allPointsForContouring.push(segment[0], segment[1]);
-      });
+      const solutionPolyTree = new ClipperLib.PolyTree();
+      // Use ctUnion to combine all segments into clean contours
+      // ptClip is not used here as we are doing a union of segments
+      const success = clipper.Execute(
+        ClipperLib.ClipType.ctUnion,
+        solutionPolyTree,
+        ClipperLib.PolyFillType.pftNonZero,
+        ClipperLib.PolyFillType.pftNonZero
+      );
 
-      if (allPointsForContouring.length > 1) {
-        const centroid = allPointsForContouring
-          .reduce((acc, p) => acc.add(p.clone()), new THREE.Vector3())
-          .divideScalar(allPointsForContouring.length);
+      if (!success) {
+        console.warn("ClipperLib Execute failed for slice at value:", slicePlaneValue);
+        return;
+      }
 
-        allPointsForContouring.sort((a, b) => {
-          let angleA, angleB;
-          if (plane === "Z") { // Project to XY plane
-            angleA = Math.atan2(a.y - centroid.y, a.x - centroid.x);
-            angleB = Math.atan2(b.y - centroid.y, b.x - centroid.x);
-          } else if (plane === "X") { // Project to YZ plane
-            angleA = Math.atan2(a.z - centroid.z, a.y - centroid.y);
-            angleB = Math.atan2(b.z - centroid.z, b.y - centroid.y);
-          } else { // Y plane
-            angleA = Math.atan2(a.z - centroid.z, a.x - centroid.x);
-            angleB = Math.atan2(b.z - centroid.z, b.x - centroid.x);
+      // Convert PolyTree to Paths (flat list of contours)
+      const solutionPaths = ClipperLib.Clipper.PolyTreeToPaths(solutionPolyTree);
+
+      solutionPaths.forEach(path => {
+        if (path.length < 2) return; // Need at least 2 points for a line
+
+        const threeJsPoints = [];
+        path.forEach(intPoint => {
+          // Scale back down to original coordinates
+          const x = intPoint.X / CL_SCALE;
+          const y = intPoint.Y / CL_SCALE;
+
+          // Convert 2D point back to 3D based on slicing plane
+          let threeDPoint;
+          if (plane === "Z") { // XY plane slice
+            threeDPoint = new THREE.Vector3(x, y, slicePlaneValue);
+          } else if (plane === "X") { // YZ plane slice
+            threeDPoint = new THREE.Vector3(slicePlaneValue, x, y); // Slice value is X, x is Y, y is Z
+          } else { // Y plane slice
+            threeDPoint = new THREE.Vector3(x, slicePlaneValue, y); // Slice value is Y, x is X, y is Z
           }
-          return angleA - angleB;
+          threeJsPoints.push(threeDPoint);
         });
 
-        const sliceGeometry = new THREE.BufferGeometry().setFromPoints(
-          allPointsForContouring.concat(allPointsForContouring[0]) // Close the loop
-        );
-        const sliceMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 });
-        const sliceLine = new THREE.LineLoop(sliceGeometry, sliceMaterial);
-        sliceLine.name = "sliceLine";
-        scene.add(sliceLine);
-      }
-    }
+        if (threeJsPoints.length > 1) {
+          const sliceGeometry = new THREE.BufferGeometry().setFromPoints(threeJsPoints.concat(threeJsPoints[0])); // Close the loop
+          const sliceMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 });
+          const sliceLine = new THREE.LineLoop(sliceGeometry, sliceMaterial);
+          sliceLine.name = "sliceLine";
+          scene.add(sliceLine);
+        }
+      });
+    });
   };
 
 
   // --- 5. Export Functions ---
+  // These functions will now export the contours generated by ClipperLib, which should be clean.
   const exportSVG = () => {
     if (!sceneState.scene) return;
     const lines = sceneState.scene.children.filter((child) => child.name === "sliceLine");
@@ -388,40 +419,36 @@ const STLViewer = ({ stlFile }) => {
     lines.forEach((line) => {
       const pos = line.geometry.attributes.position;
       let pathD = "";
+      // The points from LineLoop are already ordered correctly by ClipperLib
       for (let i = 0; i < pos.count; i++) {
-        // SVG Y-axis is inverted compared to Three.js convention
         const x = pos.getX(i);
         const y = pos.getY(i);
         const z = pos.getZ(i);
 
-        let px, py; // Projected X and Y for SVG
-        // Project points based on the current slicing plane for SVG export
+        let px, py;
         if (slicingParams.slicingPlane === "Z") {
           px = x;
           py = y;
         } else if (slicingParams.slicingPlane === "X") {
-          px = z; // When slicing on X, Y and Z form the 2D plane
+          px = z;
           py = y;
         } else { // Y plane
           px = x;
-          py = z; // When slicing on Y, X and Z form the 2D plane
+          py = z;
         }
 
-        // Update SVG bounds
         minX = Math.min(minX, px);
         minY = Math.min(minY, py);
         maxX = Math.max(maxX, px);
         maxY = Math.max(maxY, py);
 
-        // SVG Y-axis is typically inverted, so we'll invert py
         pathD += i === 0 ? `M ${px.toFixed(3)} ${(-py).toFixed(3)}` : ` L ${px.toFixed(3)} ${(-py).toFixed(3)}`;
       }
-      pathD += " Z"; // close path
+      pathD += " Z";
 
       svgPaths += `<path d="${pathD}" stroke="red" stroke-width="0.05" fill="none"/>`;
     });
 
-    // Calculate the viewBox string separately to avoid complex inline expression
     const viewBoxString = `${minX.toFixed(3)} ${(-maxY).toFixed(3)} ${(maxX - minX).toFixed(3)} ${(maxY - minY).toFixed(3)}`;
 
     const svgContent = `<?xml version="1.0" standalone="no"?>
@@ -441,13 +468,12 @@ ${svgPaths}
     let dxfContent = "0\nSECTION\n2\nENTITIES\n";
     lines.forEach((line) => {
       const pos = line.geometry.attributes.position;
+      // The points from LineLoop are already ordered correctly by ClipperLib
       for (let i = 0; i < pos.count; i++) {
-        // Get current point
         const p1x = pos.getX(i);
         const p1y = pos.getY(i);
         const p1z = pos.getZ(i);
 
-        // Get next point (wraps around for LineLoop)
         const nextIndex = (i + 1) % pos.count;
         const p2x = pos.getX(nextIndex);
         const p2y = pos.getY(nextIndex);
@@ -456,12 +482,11 @@ ${svgPaths}
         let dx1, dy1, dz1;
         let dx2, dy2, dz2;
 
-        // Project points based on the current slicing plane for DXF export
         if (slicingParams.slicingPlane === "Z") {
-          dx1 = p1x; dy1 = p1y; dz1 = 0; // DXF 2D lines typically have Z=0
+          dx1 = p1x; dy1 = p1y; dz1 = 0;
           dx2 = p2x; dy2 = p2y; dz2 = 0;
         } else if (slicingParams.slicingPlane === "X") {
-          dx1 = p1z; dy1 = p1y; dz1 = 0; // When slicing on X, Y and Z form the 2D plane
+          dx1 = p1z; dy1 = p1y; dz1 = 0;
           dx2 = p2z; dy2 = p2y; dz2 = 0;
         } else { // Y plane
           dx1 = p1x; dy1 = p1z; dz1 = 0;
@@ -573,16 +598,17 @@ ${svgPaths}
           <span style={{ marginLeft: 5 }}>{slicingParams.currentSlice.toFixed(2)}</span>
         </label>
 
-        <label style={{ marginLeft: 20 }}>
+        {/* Display Mode selection is removed as ClipperLib will always provide clean contours */}
+        {/* <label style={{ marginLeft: 20 }}>
           Display Mode:
           <select value={slicingParams.slicingDisplayMode} onChange={handleDisplayModeChange} style={{ marginLeft: 5, padding: 3 }}>
             <option value="rawSegments">Raw Segments</option>
             <option value="angleSortedContours">Angle Sorted Contours (may be garbled)</option>
           </select>
-        </label>
+        </label> */}
 
 
-        {geometry && ( // Only show layer and dimension info if a geometry is loaded
+        {geometry && (
           <>
             <span style={{ marginLeft: 20, fontSize: '0.9em' }}>
               Total Layers: {totalLayers} | Current Layer: {currentLayerIndex + 1}
