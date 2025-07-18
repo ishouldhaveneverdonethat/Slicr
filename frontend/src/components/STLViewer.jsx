@@ -129,19 +129,24 @@ const STLViewer = ({ stlFile }) => {
   }, []);
 
   const handleStepChange = useCallback((e) => {
+    // Defensive check: ensure geometry and currentScale are ready before calculations
+    if (!geometry || currentScale.x === 0 || currentScale.y === 0 || currentScale.z === 0) {
+      return; // Prevent calculations if essential data is not ready
+    }
+
     const newLayerIndex = parseInt(e.target.value, 10);
-    // Calculate the actual slice coordinate based on the layer index
-    const calculatedSliceValue = getScaledMinRangeValue() + newLayerIndex * slicingParams.sliceHeight;
+    // Pass explicit values to getScaledMinRangeValue to ensure freshness
+    const calculatedSliceValue = getScaledMinRangeValue(geometry, slicingParams.slicingPlane, currentScale.x, currentScale.y, currentScale.z) + newLayerIndex * slicingParams.sliceHeight;
 
     setSlicingParams((p) => ({
       ...p,
       currentLayerIndex: newLayerIndex,
-      currentSliceValue: calculatedSliceValue, // Update the actual coordinate
+      currentSliceValue: calculatedSliceValue,
       singleSliceMode: true,
       showSlices: true,
     }));
-    setShowMiddleSlice(false); // Disable middle slice when manual slice is adjusted
-  }, [getScaledMinRangeValue, slicingParams.sliceHeight]); // Dependencies for useCallback
+    setShowMiddleSlice(false);
+  }, [geometry, slicingParams.sliceHeight, slicingParams.slicingPlane, currentScale, getScaledMinRangeValue, setShowMiddleSlice]); // Explicitly list all dependencies
 
   const handleToggleSingleSliceMode = useCallback(() => {
     setSlicingParams((p) => ({
@@ -631,7 +636,7 @@ const STLViewer = ({ stlFile }) => {
         overallMinX = Math.min(overallMinX, currentXOffset + sliceMinX);
         overallMaxX = Math.max(overallMaxX, currentXOffset + sliceMaxX);
         overallMinY = Math.min(overallMinY, sliceMinY);
-        overallMaxY = Math.max(overallMaxY, sliceMaxY);
+        overallMaxY = Math.max(overallY, sliceMaxY);
 
         currentXOffset += sliceWidth + 10;
       }
