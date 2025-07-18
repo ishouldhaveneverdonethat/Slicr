@@ -179,10 +179,10 @@ function snapPointsToGrid(rawSegments, plane) {
  */
 function traceContours(segments) {
     const paths = new ClipperLib.Paths();
-    // Use a map to store segments by their start point, allowing quick lookup for connections
-    // Key: stringified point {X,Y}, Value: Array of {segmentIndex, endpointIndex (0 for start, 1 for end)}
-    const adjacencyMap = new Map();
-    const usedSegments = new Set();
+    const availableSegments = new Set(segments.map((_, i) => i)); // Track indices of unused segments
+
+    // Build an adjacency list: Map<stringifiedPoint, Array<{ segmentIndex, otherPoint }>>
+    const adjacencyList = new Map();
 
     segments.forEach((segment, index) => {
         const p1 = segment[0];
@@ -191,78 +191,80 @@ function traceContours(segments) {
         const key1 = `${p1.X},${p1.Y}`;
         const key2 = `${p2.X},${p2.Y}`;
 
-        if (!adjacencyMap.has(key1)) adjacencyMap.set(key1, []);
-        if (!adjacencyMap.has(key2)) adjacencyMap.set(key2, []);
+        if (!adjacencyList.has(key1)) adjacencyList.set(key1, []);
+        if (!adjacencyList.has(key2)) adjacencyList.set(key2, []);
 
-        adjacencyMap.get(key1).push({ segmentIndex: index, otherPoint: p2 });
-        adjacencyMap.get(key2).push({ segmentIndex: index, otherPoint: p1 });
+        // Store references to the segment index and the *other* endpoint
+        adjacencyList.get(key1).push({ segmentIndex: index, point: p2 });
+        adjacencyList.get(key2).push({ segmentIndex: index, point: p1 });
     });
 
-    // Iterate through all segments to find starting points for contours
-    for (let i = 0; i < segments.length; i++) {
-        if (usedSegments.has(i)) continue; // Skip if this segment is already part of a contour
+    while (availableSegments.size > 0) {
+        // Pick an arbitrary unused segment to start a new contour
+        const startIndex = availableSegments.values().next().value;
+        availableSegments.delete(startIndex); // Mark as used
 
         const currentPath = new ClipperLib.Path();
-        let currentSegmentIndex = i;
-        let currentPoint = segments[i][0]; // Start with the first point of the segment
-        const startPoint = currentPoint;
-        const startPointKey = `${startPoint.X},${startPoint.Y}`;
+        let currentSegment = segments[startIndex];
+        let currentPoint = currentSegment[0]; // Start with one end of the segment
+        const startPointOfContour = currentPoint;
 
-        let loopDetected = false;
+        // Add the first point
+        currentPath.push(currentPoint);
+        currentPoint = currentSegment[1]; // Move to the other end of the first segment
+
+        let loopClosed = false;
         let iterationCount = 0;
         const MAX_ITERATIONS = segments.length * 2 + 5; // Safety break
 
-        while (!loopDetected && iterationCount < MAX_ITERATIONS) {
+        while (!loopClosed && iterationCount < MAX_ITERATIONS) {
             iterationCount++;
 
-            // Add the current point to the path if it's not the first point being added for this segment
-            // or if it's the very first point of the contour.
+            // Add currentPoint if it's not a duplicate of the last point added
             if (currentPath.length === 0 || (currentPath[currentPath.length - 1].X !== currentPoint.X || currentPath[currentPath.length - 1].Y !== currentPoint.Y)) {
                 currentPath.push(currentPoint);
             }
-            
-            usedSegments.add(currentSegmentIndex);
 
-            const segmentsFromCurrentPoint = adjacencyMap.get(`${currentPoint.X},${currentPoint.Y}`);
-            if (!segmentsFromCurrentPoint || segmentsFromCurrentPoint.length === 0) {
-                // Dead end, cannot form a closed loop from this chain
+            // Check if we've returned to the starting point of the current contour
+            if (currentPath.length > 1 && currentPoint.X === startPointOfContour.X && currentPoint.Y === startPointOfContour.Y) {
+                loopClosed = true;
                 break;
             }
 
-            let foundNext = false;
-            for (const conn of segmentsFromCurrentPoint) {
-                if (!usedSegments.has(conn.segmentIndex)) {
-                    // This is the next segment in the chain
-                    currentSegmentIndex = conn.segmentIndex;
-                    currentPoint = conn.otherPoint; // Move to the other endpoint of the found segment
-                    foundNext = true;
+            const connectionsFromCurrentPoint = adjacencyList.get(`${currentPoint.X},${currentPoint.Y}`);
+            if (!connectionsFromCurrentPoint || connectionsFromCurrentPoint.length === 0) {
+                // Dead end, cannot close this loop
+                break;
+            }
+
+            let foundNextSegment = false;
+            for (const conn of connectionsFromCurrentPoint) {
+                if (availableSegments.has(conn.segmentIndex)) {
+                    // Found an unused segment connected to currentPoint
+                    currentSegment = segments[conn.segmentIndex];
+                    availableSegments.delete(conn.segmentIndex); // Mark as used
+
+                    // The next currentPoint is the *other* end of the found segment
+                    currentPoint = (currentSegment[0].X === currentPoint.X && currentSegment[0].Y === currentPoint.Y) ? currentSegment[1] : currentSegment[0];
+                    foundNextSegment = true;
                     break;
                 }
             }
 
-            if (!foundNext) {
-                // No unvisited segments found from this point.
-                // Check if we can close the loop by connecting back to the start point.
-                if (currentPath.length > 1 && `${currentPoint.X},${currentPoint.Y}` === startPointKey) {
-                    loopDetected = true;
+            if (!foundNextSegment) {
+                // No more unused segments connected to the current point
+                // Check if we can close the loop by connecting back to the start point
+                if (currentPath.length > 1 && currentPoint.X === startPointOfContour.X && currentPoint.Y === startPointOfContour.Y) {
+                    loopClosed = true;
                 }
-                break; // No more connections or loop not closed
-            }
-            
-            // If we found a next segment, check if the next point is the start point to close the loop
-            if (foundNext && `${currentPoint.X},${currentPoint.Y}` === startPointKey && currentPath.length > 1) {
-                loopDetected = true;
                 break;
             }
         }
 
-        if (loopDetected && currentPath.length > 2) { // Ensure it's a valid polygon (at least 3 unique points)
+        if (loopClosed && currentPath.length > 2) { // A valid closed polygon needs at least 3 unique points
             paths.push(currentPath);
-        } else if (currentPath.length > 1) {
-            // This means it was an open path that couldn't be closed.
-            // For polygon operations, we generally discard open paths.
-            // If we needed to render open paths, we'd handle them differently.
         }
+        // If not closed or too short, discard (or handle as open path if needed)
     }
 
     return paths;
@@ -281,6 +283,10 @@ function processSlicesWithClipper(slicesData, plane) {
 
     slicesData.forEach(sliceData => {
         const { value: slicePlaneValue, segments: rawSegments } = sliceData;
+
+        // Declare finalContours and isFallback at the top of the function
+        let finalContours = [];
+        let isFallback = false;
 
         if (rawSegments.length === 0) {
             processedSlices.push({
@@ -337,13 +343,10 @@ function processSlicesWithClipper(slicesData, plane) {
         clipper.AddPaths(subjectPaths, ClipperLib.PolyType.ptSubject, true); // Now 'true' because we traced them as closed
 
         const solutionPolyTree = new ClipperLib.PolyTree();
-        let clipperSuccess = false;
-        let finalContours = [];
-        let isFallback = false;
-
+        
         try {
             // Use ctUnion to combine any overlapping or adjacent polygons
-            clipperSuccess = clipper.Execute(
+            const clipperSuccess = clipper.Execute( // Declare clipperSuccess with const
                 ClipperLib.ClipType.ctUnion,
                 solutionPolyTree,
                 ClipperLib.PolyFillType.pftNonZero,
