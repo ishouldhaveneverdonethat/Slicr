@@ -5,7 +5,11 @@ import { OrbitControls } from "three-stdlib";
 
 const STLViewer = ({ stlFile }) => {
   const mountRef = useRef(null);
-  const [sceneReady, setSceneReady] = useState(false);
+  const sceneRef = useRef(null);
+  const cameraRef = useRef(null);
+  const rendererRef = useRef(null);
+  const controlsRef = useRef(null);
+  const meshRef = useRef(null);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -13,6 +17,7 @@ const STLViewer = ({ stlFile }) => {
     // Scene setup
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x121212);
+    sceneRef.current = scene;
 
     // Camera setup
     const camera = new THREE.PerspectiveCamera(
@@ -22,14 +27,16 @@ const STLViewer = ({ stlFile }) => {
       1000
     );
     camera.position.set(0, 0, 100);
+    cameraRef.current = camera;
 
     // Renderer setup
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     mount.appendChild(renderer.domElement);
+    rendererRef.current = renderer;
 
     // Controls
-    const controls = new OrbitControls(camera, renderer.domElement);
+    controlsRef.current = new OrbitControls(camera, renderer.domElement);
 
     // Lighting
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
@@ -41,12 +48,10 @@ const STLViewer = ({ stlFile }) => {
     // Animate
     const animate = () => {
       requestAnimationFrame(animate);
-      controls.update();
+      controlsRef.current.update();
       renderer.render(scene, camera);
     };
     animate();
-
-    setSceneReady(true);
 
     return () => {
       mount.removeChild(renderer.domElement);
@@ -54,7 +59,7 @@ const STLViewer = ({ stlFile }) => {
   }, []);
 
   useEffect(() => {
-    if (!sceneReady || !stlFile) return;
+    if (!stlFile || !sceneRef.current) return;
 
     const loader = new STLLoader();
     loader.load(stlFile, (geometry) => {
@@ -66,19 +71,14 @@ const STLViewer = ({ stlFile }) => {
       geometry.boundingBox.getCenter(center);
       mesh.position.sub(center); // center the mesh
 
-      mesh.name = "stlMesh";
-
-      const mount = mountRef.current;
-      const renderer = mount.children[0];
-      const scene = renderer?.__scene;
-
-      if (scene) {
-        const existing = scene.getObjectByName("stlMesh");
-        if (existing) scene.remove(existing);
-        scene.add(mesh);
+      if (meshRef.current) {
+        sceneRef.current.remove(meshRef.current);
       }
+
+      sceneRef.current.add(mesh);
+      meshRef.current = mesh;
     });
-  }, [stlFile, sceneReady]);
+  }, [stlFile]);
 
   return <div ref={mountRef} style={{ width: "100%", height: "100vh" }} />;
 };
