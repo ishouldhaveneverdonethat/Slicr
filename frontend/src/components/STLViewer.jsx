@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import * as THREE from "three";
 import { STLLoader } from "three-stdlib";
 import { OrbitControls } from "three-stdlib";
@@ -19,6 +19,21 @@ const STLViewer = ({ stlFile }) => {
     singleSliceMode: false,
     slicingPlane: "Z",
   });
+
+  // --- Debounce state for slicing ---
+  const [debouncedSlicingParams, setDebouncedSlicingParams] = useState(slicingParams);
+
+  // Custom debounce hook (or simple implementation directly in useEffect)
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedSlicingParams(slicingParams);
+    }, 200); // Debounce delay: 200ms
+
+    return () => {
+      clearTimeout(handler);
+    };
+  }, [slicingParams]);
+
 
   // --- 4. UI Controls Handlers ---
   const handleSliceHeightChange = (e) => {
@@ -150,47 +165,36 @@ const STLViewer = ({ stlFile }) => {
         sceneState.controls.update();
       }
 
-      clearSlices(scene);
-      if (slicingParams.showSlices) {
-         let sliceValueToRender = null;
-         if (slicingParams.singleSliceMode) {
-           sliceValueToRender = slicingParams.currentSlice;
-         }
-         const segments = getSliceSegments(
-           loadedGeometry,
-           slicingParams.sliceHeight,
-           sliceValueToRender,
-           slicingParams.slicingPlane
-         );
-         renderSlicesWithClipper(segments, scene, slicingParams.slicingPlane);
-      }
+      // Initial slicing (now debounced)
+      // The actual slicing logic will be triggered by the debouncedSlicingParams useEffect
     },
     undefined,
     (error) => {
       console.error("Error loading STL file:", error);
       alert("Error loading STL file. Please check the file and try again.");
     });
-  }, [stlFile, sceneState.scene, sceneState.camera, sceneState.controls, slicingParams.singleSliceMode, slicingParams.currentSlice, slicingParams.sliceHeight, slicingParams.slicingPlane, slicingParams.showSlices]);
+  }, [stlFile, sceneState.scene, sceneState.camera, sceneState.controls]);
 
-  // --- Re-slice when slicingParams change (if geometry exists) ---
+  // --- Re-slice when debouncedSlicingParams change (if geometry exists) ---
+  // This useEffect now depends on debouncedSlicingParams
   useEffect(() => {
     if (geometry && sceneState.scene) {
       clearSlices(sceneState.scene);
-      if (slicingParams.showSlices) {
+      if (debouncedSlicingParams.showSlices) {
         let sliceValueToRender = null;
-        if (slicingParams.singleSliceMode) {
-          sliceValueToRender = slicingParams.currentSlice;
+        if (debouncedSlicingParams.singleSliceMode) {
+          sliceValueToRender = debouncedSlicingParams.currentSlice;
         }
-        const segments = getSliceSegments(
+        const slicesData = getSliceSegments(
           geometry,
-          slicingParams.sliceHeight,
+          debouncedSlicingParams.sliceHeight,
           sliceValueToRender,
-          slicingParams.slicingPlane
+          debouncedSlicingParams.slicingPlane
         );
-        renderSlicesWithClipper(segments, sceneState.scene, slicingParams.slicingPlane);
+        renderSlicesWithClipper(slicesData, sceneState.scene, debouncedSlicingParams.slicingPlane);
       }
     }
-  }, [slicingParams.sliceHeight, slicingParams.showSlices, slicingParams.currentSlice, slicingParams.singleSliceMode, slicingParams.slicingPlane, geometry, sceneState.scene]);
+  }, [debouncedSlicingParams, geometry, sceneState.scene]); // Depends on debounced state
 
   // --- 6. Utility Functions ---
   const clearSlices = (scene) => {
@@ -213,7 +217,7 @@ const STLViewer = ({ stlFile }) => {
    * @returns {Array<{ value: number, segments: Array<Array<THREE.Vector3>> }>} An array of objects,
    * each containing the slice plane value and its raw segments.
    */
-  const getSliceSegments = (geometry, heightStep, currentSliceVal, plane) => {
+  const getSliceSegments = useCallback((geometry, heightStep, currentSliceVal, plane) => {
     const pos = geometry.attributes.position;
     const bbox = geometry.boundingBox;
     const slicesData = [];
@@ -248,7 +252,8 @@ const STLViewer = ({ stlFile }) => {
     const p2 = new THREE.Vector3();
     const p3 = new THREE.Vector3();
 
-    const epsilon = 1e-6; // Epsilon for floating point comparisons
+    // Increased epsilon for filtering very small segments
+    const epsilon = 1e-5; // Increased from 1e-6
 
     valuesToSlice.forEach((value) => {
       const segmentsForCurrentSlice = [];
@@ -272,7 +277,7 @@ const STLViewer = ({ stlFile }) => {
             (val1 <= value + epsilon && val2 >= value - epsilon) ||
             (val2 <= value + epsilon && val1 >= value - epsilon)
           ) {
-            if (Math.abs(val2 - val1) < epsilon) { // Edge is co-planar or degenerate
+            if (Math.abs(val2 - val1) < epsilon) {
               continue;
             }
 
@@ -283,7 +288,6 @@ const STLViewer = ({ stlFile }) => {
         }
 
         if (currentTriangleIntersectionPoints.length === 2) {
-          // Filter out degenerate segments (points too close)
           if (currentTriangleIntersectionPoints[0].distanceTo(currentTriangleIntersectionPoints[1]) > epsilon) {
             segmentsForCurrentSlice.push(currentTriangleIntersectionPoints);
           }
@@ -294,7 +298,7 @@ const STLViewer = ({ stlFile }) => {
       }
     });
     return slicesData;
-  };
+  }, []); // useCallback with empty dependency array for stability
 
   /**
    * renderSlicesWithClipper
@@ -303,15 +307,13 @@ const STLViewer = ({ stlFile }) => {
    * @param {THREE.Scene} scene The Three.js scene to add lines to.
    * @param {'X' | 'Y' | 'Z'} plane The slicing plane, used for projection.
    */
-  const renderSlicesWithClipper = (slicesData, scene, plane) => {
+  const renderSlicesWithClipper = useCallback((slicesData, scene, plane) => {
     const CL_SCALE = 10000000; // Increased scale factor for ClipperLib (10 million)
 
     slicesData.forEach(sliceData => {
       const { value: slicePlaneValue, segments: rawSegments } = sliceData;
 
-      // If no raw segments for this slice, skip processing with ClipperLib
       if (rawSegments.length === 0) {
-        // console.log(`Skipping ClipperLib for slice at value: ${slicePlaneValue} (no raw segments).`);
         return;
       }
 
@@ -338,15 +340,12 @@ const STLViewer = ({ stlFile }) => {
         const intP1 = { X: Math.round(x1 * CL_SCALE), Y: Math.round(y1 * CL_SCALE) };
         const intP2 = { X: Math.round(x2 * CL_SCALE), Y: Math.round(y2 * CL_SCALE) };
 
-        // Add each segment as a path to ClipperLib
         const path = new ClipperLib.Path();
         path.push(intP1);
         path.push(intP2);
         subjectPaths.push(path);
       });
       
-      // --- CRITICAL FIX: Add the subjectPaths to the clipper object ---
-      // This was the missing line causing ClipperLib.Execute to fail.
       clipper.AddPaths(subjectPaths, ClipperLib.PolyType.ptSubject, true); 
 
       const solutionPolyTree = new ClipperLib.PolyTree();
@@ -361,10 +360,9 @@ const STLViewer = ({ stlFile }) => {
 
         if (!clipperSuccess) {
           console.warn(`ClipperLib Execute failed for slice at value: ${slicePlaneValue}. Falling back to raw segments.`);
-          // Fallback: render raw segments if ClipperLib fails
           rawSegments.forEach(segment => {
             const segmentGeometry = new THREE.BufferGeometry().setFromPoints(segment);
-            const segmentMaterial = new THREE.LineBasicMaterial({ color: 0x00ff00 }); // Green for fallback
+            const segmentMaterial = new THREE.LineBasicMaterial({ color: 0x00ff00 });
             const line = new THREE.LineSegments(segmentGeometry, segmentMaterial);
             line.name = "sliceLine";
             scene.add(line);
@@ -372,18 +370,16 @@ const STLViewer = ({ stlFile }) => {
           return;
         }
       } catch (e) {
-        console.error(`ClipperLib threw an error for slice at value: ${slicePlaneValue}. Error:`, e, 'Falling back to raw segments.');
-        // Fallback: render raw segments if ClipperLib throws
+        console.error(`ClipperLib threw an error for slice at value: ${slicePlaneValue}. Error:`, e, 'Falling back to raw segments. Raw segments:', JSON.stringify(rawSegments.map(s => s.map(p => p.toArray()))));
         rawSegments.forEach(segment => {
           const segmentGeometry = new THREE.BufferGeometry().setFromPoints(segment);
-          const segmentMaterial = new THREE.LineBasicMaterial({ color: 0x00ff00 }); // Green for fallback
+          const segmentMaterial = new THREE.LineBasicMaterial({ color: 0x00ff00 });
           const line = new THREE.LineSegments(segmentGeometry, segmentMaterial);
           line.name = "sliceLine";
           scene.add(line);
         });
         return;
       }
-
 
       const solutionPaths = ClipperLib.Clipper.PolyTreeToPaths(solutionPolyTree);
 
@@ -408,14 +404,14 @@ const STLViewer = ({ stlFile }) => {
 
         if (threeJsPoints.length > 1) {
           const sliceGeometry = new THREE.BufferGeometry().setFromPoints(threeJsPoints.concat(threeJsPoints[0]));
-          const sliceMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 }); // Red for Clipper-generated contours
+          const sliceMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 });
           const sliceLine = new THREE.LineLoop(sliceGeometry, sliceMaterial);
           sliceLine.name = "sliceLine";
           scene.add(sliceLine);
         }
       });
     });
-  };
+  }, []); // useCallback with empty dependency array for stability
 
   // --- 5. Export Functions ---
   const exportSVG = () => {
