@@ -189,22 +189,11 @@ const STLViewer = ({ stlFile }) => {
       // Optionally reset to original or prevent update if invalid
       // For proportional scaling, if input is invalid, it's better to revert to current
       // or simply not update, to avoid breaking aspect ratio with 0 or NaN.
-      console.warn(`Invalid input for ${dimension}: ${e.target.value}. Value must be a positive number.`);
       return;
     }
 
-    let scaleFactor = 1;
-
-    // Calculate scale factor based on the changed dimension
-    if (dimension === 'width' && originalDimensions.x > 0) {
-      scaleFactor = inputValue / originalDimensions.x;
-    } else if (dimension === 'height' && originalDimensions.y > 0) {
-      scaleFactor = inputValue / originalDimensions.y;
-    } else if (dimension === 'depth' && originalDimensions.z > 0) {
-      scaleFactor = inputValue / originalDimensions.z;
-    } else {
+    if (originalDimensions.x === 0 || originalDimensions.y === 0 || originalDimensions.z === 0) {
         // This case should ideally not happen if originalDimensions are always > 0
-        console.warn(`Original dimension for ${dimension} is zero. Cannot scale proportionally.`);
         // If original dimension is zero, we can't calculate a proportional scale.
         // Just set the target dimension directly for the changed axis.
         setTargetDimensions(prev => ({
@@ -212,6 +201,15 @@ const STLViewer = ({ stlFile }) => {
             [dimension]: inputValue
         }));
         return;
+    }
+
+    let scaleFactor = 1;
+    if (dimension === 'width') {
+      scaleFactor = inputValue / originalDimensions.x;
+    } else if (dimension === 'height') {
+      scaleFactor = inputValue / originalDimensions.y;
+    } else if (dimension === 'depth') {
+      scaleFactor = inputValue / originalDimensions.z;
     }
 
     // Apply the calculated scaleFactor to all dimensions based on original dimensions
@@ -348,9 +346,8 @@ const STLViewer = ({ stlFile }) => {
     },
     undefined,
     (error) => {
-      console.error("Error loading STL file:", error);
       // Using console.log instead of alert() as per instructions
-      console.log("Error loading STL file. Please check the file and try again.");
+      console.error("Error loading STL file:", error);
     });
   }, [stlFile, sceneState.scene, showModelOutline]); // Removed camera/controls from deps here, handled by scaling effect
 
@@ -384,6 +381,7 @@ const STLViewer = ({ stlFile }) => {
     // Apply scale to the mesh
     mesh.scale.set(newScaleX, newScaleY, newScaleZ);
     setCurrentScale({ x: newScaleX, y: newScaleY, z: newScaleZ }); // Store actual applied scale
+
 
     // Update camera and controls based on new scale
     if (sceneState.camera && sceneState.controls) {
@@ -509,7 +507,7 @@ const STLViewer = ({ stlFile }) => {
   const exportSVG = () => {
     if (!sceneState.scene) return;
     const lines = sceneState.scene.children.filter((child) => child.name === "sliceLine");
-    if (lines.length === 0) return console.log("No slices to export."); // Using console.log instead of alert()
+    if (lines.length === 0) return; // Removed console.log
 
     let currentXOffset = 0;
     let overallMinX = Infinity;
@@ -613,7 +611,7 @@ ${svgPaths}
   const exportDXF = () => {
     if (!sceneState.scene) return;
     const lines = sceneState.scene.children.filter((child) => child.name === "sliceLine");
-    if (lines.length === 0) return console.log("No slices to export."); // Using console.log instead of alert()
+    if (lines.length === 0) return; // Removed console.log
 
     let currentXOffset = 0;
     const slicesToExport = []; // Store processed slice data for export
@@ -628,7 +626,6 @@ ${svgPaths}
         const p1y = pos.getY(i);
         const p1z = pos.getZ(i);
 
-        // Ensure there's a second point for the segment
         if (i + 1 >= pos.count) continue; 
         
         const p2x = pos.getX(i + 1);
