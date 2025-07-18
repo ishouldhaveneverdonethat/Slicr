@@ -11,8 +11,11 @@ const SlicerWorker = new Worker(new URL('../workers/slicerWorker.js', import.met
 
 const STLViewer = ({ stlFile }) => {
   // --- 1. Model and Geometry State ---
-  const mountRef = useRef(null);
+  const mountRef = useRef(null); // Ref for the main viewer
+  const miniViewerMountRef = useRef(null); // Ref for the mini-viewer
   const [sceneState, setSceneState] = useState({ scene: null, renderer: null, camera: null, controls: null });
+  // miniViewerState no longer needs controls as they are synchronized
+  const [miniViewerState, setMiniViewerState] = useState({ scene: null, renderer: null, camera: null });
   const [geometry, setGeometry] = useState(null);
   const [originalDimensions, setOriginalDimensions] = useState({ x: 0, y: 0, z: 0 });
   const [targetDimensions, setTargetDimensions] = useState({ width: 0, height: 0, depth: 0 });
@@ -33,6 +36,8 @@ const STLViewer = ({ stlFile }) => {
   const [showModelOutline, setShowModelOutline] = useState(true); // Default to true
   // --- New state for showing middle slice ---
   const [showMiddleSlice, setShowMiddleSlice] = useState(false); // Default to false
+  // --- New state for showing mini-viewer ---
+  const [showMiniViewer, setShowMiniViewer] = useState(false); // Default to false
 
   // --- Debounce state for slicing ---
   const [debouncedSlicingParams, setDebouncedSlicingParams] = useState(slicingParams);
@@ -182,6 +187,11 @@ const STLViewer = ({ stlFile }) => {
     }));
   };
 
+  // Handler for showing mini-viewer
+  const handleToggleMiniViewer = () => {
+    setShowMiniViewer(prev => !prev);
+  };
+
   // New: Handlers for target dimension changes with proportional scaling
   const handleTargetDimensionChange = (dimension) => (e) => {
     const inputValue = parseFloat(e.target.value);
@@ -225,7 +235,7 @@ const STLViewer = ({ stlFile }) => {
   };
 
 
-  // --- 2. Scene Setup and Render ---
+  // --- Main Scene Setup and Render ---
   useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return;
@@ -254,12 +264,15 @@ const STLViewer = ({ stlFile }) => {
     directionalLight.position.set(50, 50, 100).normalize();
     scene.add(directionalLight);
 
+    setSceneState({ scene, renderer, camera, controls });
+
     const handleResize = () => {
       if (mount) {
         camera.aspect = mount.clientWidth / mount.clientHeight;
         camera.updateProjectionMatrix();
         renderer.setSize(mount.clientWidth, mount.clientHeight);
       }
+      // Mini-viewer resize handled in its own useEffect
     };
     window.addEventListener("resize", handleResize);
 
@@ -267,17 +280,78 @@ const STLViewer = ({ stlFile }) => {
       requestAnimationFrame(animate);
       controls.update();
       renderer.render(scene, camera);
+
+      // Synchronize mini-viewer camera with main camera
+      if (showMiniViewer && miniViewerState.renderer && miniViewerState.scene && miniViewerState.camera && sceneState.camera && sceneState.controls) {
+        miniViewerState.camera.position.copy(sceneState.camera.position);
+        miniViewerState.camera.quaternion.copy(sceneState.camera.quaternion);
+        // Ensure mini-viewer looks at the same target as main viewer
+        miniViewerState.camera.lookAt(sceneState.controls.target);
+        miniViewerState.renderer.render(miniViewerState.scene, miniViewerState.camera);
+      }
     };
     animate();
-
-    setSceneState({ scene, renderer, camera, controls });
 
     return () => {
       window.removeEventListener("resize", handleResize);
       controls.dispose();
       renderer.dispose();
     };
-  }, []); // Empty dependency array means this runs once on mount
+  }, [showMiniViewer, sceneState.camera, sceneState.controls, miniViewerState.camera, miniViewerState.renderer, miniViewerState.scene]); // Added miniViewerState dependencies for sync
+
+
+  // --- Mini-Viewer Setup (Independent from main viewer's useEffect) ---
+  useEffect(() => {
+    const miniViewerMount = miniViewerMountRef.current;
+    if (!miniViewerMount) return;
+
+    // If mini-viewer is not supposed to be shown, clean up and return
+    if (!showMiniViewer) {
+      if (miniViewerState.renderer) {
+        miniViewerState.renderer.dispose();
+        setMiniViewerState({ scene: null, renderer: null, camera: null });
+      }
+      return;
+    }
+
+    // Clear existing children before setting up
+    while (miniViewerMount.firstChild) {
+      miniViewerMount.removeChild(miniViewerMount.firstChild);
+    }
+
+    const miniScene = new THREE.Scene();
+    miniScene.background = new THREE.Color(0x333333); // Different background for mini-viewer
+
+    const miniCamera = new THREE.PerspectiveCamera(75, miniViewerMount.clientWidth / miniViewerMount.clientHeight, 0.1, 1000);
+    miniCamera.position.set(0, 0, 100);
+    miniScene.add(new THREE.AmbientLight(0xffffff, 0.6));
+    // Re-create directional light for mini-scene to ensure independence
+    const miniDirectionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    miniDirectionalLight.position.set(50, 50, 100).normalize();
+    miniScene.add(miniDirectionalLight);
+
+    const miniRenderer = new THREE.WebGLRenderer({ antialias: true });
+    miniRenderer.setPixelRatio(window.devicePixelRatio);
+    miniRenderer.setSize(miniViewerMount.clientWidth, miniViewerMount.clientHeight);
+    miniViewerMount.appendChild(miniRenderer.domElement);
+
+    setMiniViewerState({ scene: miniScene, renderer: miniRenderer, camera: miniCamera });
+
+    const handleMiniResize = () => {
+      if (miniViewerMount && miniCamera && miniRenderer) {
+        miniCamera.aspect = miniViewerMount.clientWidth / miniViewerMount.clientHeight;
+        miniCamera.updateProjectionMatrix();
+        miniRenderer.setSize(miniViewerMount.clientWidth, miniViewerMount.clientHeight);
+      }
+    };
+    window.addEventListener("resize", handleMiniResize);
+
+    return () => {
+      window.removeEventListener("resize", handleMiniResize);
+      if (miniRenderer) miniRenderer.dispose();
+    };
+  }, [showMiniViewer]); // Re-run this effect when showMiniViewer changes
+
 
   // --- 1. STL Loader & Mesh Setup ---
   useEffect(() => {
@@ -307,7 +381,6 @@ const STLViewer = ({ stlFile }) => {
       mesh.position.sub(center);
       mesh.name = "stlMesh";
       
-      // Do NOT apply scale here initially, it will be done in a separate useEffect
       const scene = sceneState.scene;
       const existingMesh = scene.getObjectByName("stlMesh");
       if (existingMesh) {
@@ -341,6 +414,30 @@ const STLViewer = ({ stlFile }) => {
       scene.add(modelOutlines);
       // --- End Model Outline Logic ---
 
+      // --- Add model to mini-viewer ---
+      if (miniViewerState.scene) {
+        const miniMesh = mesh.clone(); // Clone the mesh for the mini-viewer
+        miniMesh.name = "miniStlMesh";
+        const existingMiniMesh = miniViewerState.scene.getObjectByName("miniStlMesh");
+        if (existingMiniMesh) {
+          miniViewerState.scene.remove(existingMiniMesh);
+          if (existingMiniMesh.geometry) existingMiniMesh.geometry.dispose();
+          if (existingMiniMesh.material) existingMiniMesh.material.dispose();
+        }
+        miniViewerState.scene.add(miniMesh);
+
+        // Position mini-viewer camera
+        if (miniViewerState.camera) { // miniViewerState.controls is not used here for positioning
+          const size = new THREE.Vector3();
+          loadedGeometry.boundingBox.getSize(size);
+          const maxDim = Math.max(size.x, size.y, size.z);
+          const fov = miniViewerState.camera.fov * (Math.PI / 180);
+          let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
+          cameraZ *= 1.5;
+          miniViewerState.camera.position.set(center.x, center.y, center.z + cameraZ);
+          miniViewerState.camera.lookAt(center);
+        }
+      }
 
       // Camera and controls will be updated by the scaling useEffect
     },
@@ -349,25 +446,23 @@ const STLViewer = ({ stlFile }) => {
       // Using console.log instead of alert() as per instructions
       console.error("Error loading STL file:", error);
     });
-  }, [stlFile, sceneState.scene, showModelOutline]); // Removed camera/controls from deps here, handled by scaling effect
+  }, [stlFile, sceneState.scene, showModelOutline, miniViewerState.scene, miniViewerState.camera]); // Added miniViewerState.camera to dependencies
 
 
-  // --- Effect to handle model scaling and camera adjustment ---
+  // --- Effect to handle model scaling and camera adjustment (main and mini-viewer) ---
   useEffect(() => {
     if (!geometry || !sceneState.scene || originalDimensions.x === 0 || originalDimensions.y === 0 || originalDimensions.z === 0) {
       // If original dimensions are zero, or geometry/scene not ready, cannot calculate scale
-      // Also, if original dimensions are 0, we can't calculate a valid scale factor for proportional scaling.
-      // This might happen if the STL file is invalid or has degenerate geometry.
       return;
     }
 
     const mesh = sceneState.scene.getObjectByName("stlMesh");
+    const miniMesh = miniViewerState.scene ? miniViewerState.scene.getObjectByName("miniStlMesh") : null;
     if (!mesh) return;
 
     let newScaleX = 1, newScaleY = 1, newScaleZ = 1;
 
     // Calculate scales based on target dimensions relative to original dimensions
-    // Handle cases where original dimension might be 0 to prevent division by zero
     if (originalDimensions.x > 0 && targetDimensions.width > 0) {
       newScaleX = targetDimensions.width / originalDimensions.x;
     }
@@ -378,12 +473,16 @@ const STLViewer = ({ stlFile }) => {
       newScaleZ = targetDimensions.depth / originalDimensions.z;
     }
 
-    // Apply scale to the mesh
+    // Apply scale to the main mesh
     mesh.scale.set(newScaleX, newScaleY, newScaleZ);
+    // Apply scale to the mini-viewer mesh if it exists
+    if (miniMesh) {
+      miniMesh.scale.set(newScaleX, newScaleY, newScaleZ);
+    }
     setCurrentScale({ x: newScaleX, y: newScaleY, z: newScaleZ }); // Store actual applied scale
 
 
-    // Update camera and controls based on new scale
+    // Update camera and controls based on new scale for main viewer
     if (sceneState.camera && sceneState.controls) {
       const scaledSize = new THREE.Vector3(
         originalDimensions.x * newScaleX,
@@ -405,6 +504,26 @@ const STLViewer = ({ stlFile }) => {
       sceneState.controls.update();
     }
 
+    // Update camera for mini-viewer as well (no controls needed here)
+    if (miniViewerState.camera && miniMesh) {
+      const scaledSize = new THREE.Vector3();
+      geometry.boundingBox.getSize(scaledSize);
+      scaledSize.multiply(new THREE.Vector3(newScaleX, newScaleY, newScaleZ));
+
+      const scaledCenter = new THREE.Vector3();
+      geometry.boundingBox.getCenter(scaledCenter);
+      scaledCenter.multiply(new THREE.Vector3(newScaleX, newScaleY, newScaleZ));
+
+      const maxDim = Math.max(scaledSize.x, scaledSize.y, scaledSize.z);
+      const fov = miniViewerState.camera.fov * (Math.PI / 180);
+      let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
+      cameraZ *= 1.5;
+
+      miniViewerState.camera.position.set(scaledCenter.x, scaledCenter.y, scaledCenter.z + cameraZ);
+      miniViewerState.camera.lookAt(scaledCenter);
+    }
+
+
     // Update slicingParams with the new scale factors
     setSlicingParams(prev => ({
       ...prev,
@@ -415,7 +534,7 @@ const STLViewer = ({ stlFile }) => {
     }));
     setShowMiddleSlice(false); // Disable middle slice on scale change
 
-  }, [targetDimensions, originalDimensions, geometry, sceneState.scene, sceneState.camera, sceneState.controls]);
+  }, [targetDimensions, originalDimensions, geometry, sceneState.scene, sceneState.camera, sceneState.controls, miniViewerState.scene, miniViewerState.camera]);
 
 
   // --- Effect to update model outline visibility when showModelOutline changes ---
@@ -427,6 +546,20 @@ const STLViewer = ({ stlFile }) => {
       }
     }
   }, [showModelOutline, sceneState.scene]);
+
+  // --- Effect to toggle main model visibility based on showMiniViewer ---
+  useEffect(() => {
+    if (sceneState.scene) {
+      const stlMesh = sceneState.scene.getObjectByName("stlMesh");
+      const modelOutline = sceneState.scene.getObjectByName("modelOutline");
+      if (stlMesh) {
+        stlMesh.visible = !showMiniViewer; // Hide if mini-viewer is shown
+      }
+      if (modelOutline) {
+        modelOutline.visible = !showMiniViewer && showModelOutline; // Hide if mini-viewer is shown, also respect showModelOutline
+      }
+    }
+  }, [showMiniViewer, sceneState.scene, showModelOutline]);
 
 
   // --- Send slicing request to worker when debounced params or geometry change ---
@@ -507,7 +640,7 @@ const STLViewer = ({ stlFile }) => {
   const exportSVG = () => {
     if (!sceneState.scene) return;
     const lines = sceneState.scene.children.filter((child) => child.name === "sliceLine");
-    if (lines.length === 0) return; // Removed console.log
+    if (lines.length === 0) return;
 
     let currentXOffset = 0;
     let overallMinX = Infinity;
@@ -611,7 +744,7 @@ ${svgPaths}
   const exportDXF = () => {
     if (!sceneState.scene) return;
     const lines = sceneState.scene.children.filter((child) => child.name === "sliceLine");
-    if (lines.length === 0) return; // Removed console.log
+    if (lines.length === 0) return;
 
     let currentXOffset = 0;
     const slicesToExport = []; // Store processed slice data for export
@@ -714,8 +847,8 @@ ${svgPaths}
   }
 
   return (
-    <div>
-      <div style={{ padding: 10, background: '#282c34', color: 'white', borderBottom: '1px solid #444' }}>
+    <div style={{ position: 'relative', width: '100%', height: '100vh', overflow: 'hidden' }}>
+      <div style={{ padding: 10, background: '#282c34', color: 'white', borderBottom: '1px solid #444', zIndex: 10 }}>
         <label>
           Slice Height:
           <input
@@ -756,6 +889,16 @@ ${svgPaths}
             style={{ marginRight: 5 }}
           />
           Show Middle Slice {/* New UI label */}
+        </label>
+
+        <label style={{ marginLeft: 20 }}>
+          <input
+            type="checkbox"
+            checked={showMiniViewer} // New state for mini-viewer
+            onChange={handleToggleMiniViewer} // New handler
+            style={{ marginRight: 5 }}
+          />
+          Show Model View {/* New UI label for mini-viewer */}
         </label>
 
         <label style={{ marginLeft: 20 }}>
@@ -848,6 +991,21 @@ ${svgPaths}
         </button>
       </div>
       <div ref={mountRef} style={{ width: "100%", height: "calc(100vh - 50px)" }} />
+      {showMiniViewer && (
+        <div 
+          ref={miniViewerMountRef} 
+          style={{ 
+            position: 'absolute', 
+            top: '10px', 
+            right: '10px', 
+            width: '25%', 
+            height: '25%', 
+            border: '1px solid #555', 
+            boxShadow: '0 0 10px rgba(0,0,0,0.5)',
+            zIndex: 9 // Ensure it's above the main canvas
+          }} 
+        />
+      )}
     </div>
   );
 };
