@@ -262,7 +262,8 @@ const STLViewer = ({ stlFile }) => {
         }
 
         // Prepare data for the worker (transferable objects like Float32Array)
-        const positionArray = geometry.attributes.position.array;
+        // CRITICAL FIX: Create a NEW Float32Array to send a COPY of the buffer
+        const positionArrayCopy = new Float32Array(geometry.attributes.position.array);
         const bboxData = {
           min: geometry.boundingBox.min.toArray(),
           max: geometry.boundingBox.max.toArray(),
@@ -271,13 +272,13 @@ const STLViewer = ({ stlFile }) => {
         workerInstanceRef.current.postMessage({
           type: 'sliceModel',
           payload: {
-            positionArray: positionArray,
+            positionArray: positionArrayCopy, // Send the copy
             bboxData: bboxData,
             sliceHeight: debouncedSlicingParams.sliceHeight,
             currentSlice: sliceValueToRender,
             slicingPlane: debouncedSlicingParams.slicingPlane,
           }
-        }, [positionArray.buffer]); // Transferable array buffer for performance
+        }, [positionArrayCopy.buffer]); // Transfer the buffer of the COPY
       }
     }
   }, [debouncedSlicingParams, geometry, sceneState.scene]); // Depends on debounced state and geometry
