@@ -305,7 +305,7 @@ const STLViewer = ({ stlFile }) => {
       window.removeEventListener("resize", handleResize);
       cancelAnimationFrame(animationFrameId);
       if (controlsRef.current) controlsRef.current.dispose();
-      if (rendererRef.current) rendererRef.current.dispose();
+      if (rendererRef.current) renderer.dispose(); // Use renderer.dispose() directly
       if (miniRendererRef.current) miniRendererRef.current.dispose();
     };
   }, []); // Empty dependency array ensures this runs only once
@@ -543,36 +543,37 @@ const STLViewer = ({ stlFile }) => {
         });
       }
     }
-  }, [debouncedSlicingParams, geometry, showMiddleSlice, currentScale]);
+  }, [debouncedSlicingParams, geometry, showMiddleSlice, currentScale, clearSlices, getScaledMinRangeValue, getScaledMaxRangeValue]);
 
 
   // --- Utility Functions ---
-  const clearSlices = useCallback((scene) => {
+  // These are now regular functions, not useCallback, to simplify dependency management
+  const clearSlices = (scene) => {
     const slices = scene.children.filter((child) => child.name === "sliceLine");
     slices.forEach((line) => {
       scene.remove(line);
       if (line.geometry) line.geometry.dispose();
       if (line.material) line.material.dispose();
     });
-  }, []);
+  };
 
-  const getScaledMinRangeValue = useCallback((geom, plane, scaleX, scaleY, scaleZ) => {
+  const getScaledMinRangeValue = (geom, plane, scaleX, scaleY, scaleZ) => {
     if (!geom || !geom.boundingBox) return 0;
     const minVal = geom.boundingBox.min[plane.toLowerCase()];
     if (plane === 'X') return minVal * scaleX;
     if (plane === 'Y') return minVal * scaleY;
     if (plane === 'Z') return minVal * scaleZ;
     return minVal;
-  }, []); // Removed geometry, slicingParams.slicingPlane, currentScale from dependencies as they are passed as arguments
+  };
 
-  const getScaledMaxRangeValue = useCallback((geom, plane, scaleX, scaleY, scaleZ) => {
+  const getScaledMaxRangeValue = (geom, plane, scaleX, scaleY, scaleZ) => {
     if (!geom || !geom.boundingBox) return 100;
     const maxVal = geom.boundingBox.max[plane.toLowerCase()];
     if (plane === 'X') return maxVal * scaleX;
     if (plane === 'Y') return maxVal * scaleY;
     if (plane === 'Z') return maxVal * scaleZ;
     return maxVal;
-  }, []); // Removed geometry, slicingParams.slicingPlane, currentScale from dependencies as they are passed as arguments
+  };
 
   // --- Export Functions (unchanged) ---
   const exportSVG = () => {
@@ -584,7 +585,7 @@ const STLViewer = ({ stlFile }) => {
     let overallMinX = Infinity;
     let overallMinY = Infinity;
     let overallMaxX = -Infinity;
-    let overallMaxY = -Infinity; // Fixed typo here
+    let overallMaxY = -Infinity; 
 
     const slicesToExport = [];
 
@@ -642,7 +643,7 @@ const STLViewer = ({ stlFile }) => {
         overallMinX = Math.min(overallMinX, currentXOffset + sliceMinX);
         overallMaxX = Math.max(overallMaxX, currentXOffset + sliceMaxX);
         overallMinY = Math.min(overallMinY, sliceMinY);
-        overallMaxY = Math.max(overallMaxY, sliceMaxY); // Fixed typo here
+        overallMaxY = Math.max(overallMaxY, sliceMaxY); 
 
         currentXOffset += sliceWidth + 10;
       }
@@ -757,6 +758,7 @@ ${svgPaths}
     saveAs(blob, "slice.dxf");
   };
 
+  // These values are now calculated directly in the render, not memoized as they depend on changing state
   const minRangeValue = getScaledMinRangeValue(geometry, slicingParams.slicingPlane, currentScale.x, currentScale.y, currentScale.z);
   const maxRangeValue = getScaledMaxRangeValue(geometry, slicingParams.slicingPlane, currentScale.x, currentScale.y, currentScale.z);
 
