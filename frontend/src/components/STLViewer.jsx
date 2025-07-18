@@ -50,7 +50,7 @@ const STLViewer = ({ stlFile }) => {
 
     workerInstanceRef.current.onmessage = (event) => {
       const { type, payload } = event.data;
-      if (type === 'slicingComplete' && sceneRef.current) {
+      if (type === 'slicingComplete' && sceneRef.current) { // Ensure sceneRef.current is available
         clearSlices(sceneRef.current);
         
         payload.forEach(sliceData => {
@@ -88,7 +88,7 @@ const STLViewer = ({ stlFile }) => {
           }
           
           sliceLine.name = "sliceLine";
-          sceneRef.current.add(sliceLine);
+          sceneRef.current.add(sliceLine); // Add slices to the main scene
         });
       }
     };
@@ -101,6 +101,106 @@ const STLViewer = ({ stlFile }) => {
     }, 200);
     return () => clearTimeout(handler);
   }, [slicingParams]);
+
+
+  // --- UI Controls Handlers (Wrapped in useCallback) ---
+  const handleSliceHeightChange = useCallback((e) => {
+    setSlicingParams((p) => ({
+      ...p,
+      sliceHeight: parseFloat(e.target.value),
+      singleSliceMode: false,
+      currentLayerIndex: 0, // Reset layer index when height changes
+    }));
+    setShowMiddleSlice(false); // Disable middle slice when height changes
+  }, []);
+
+  const handlePlaneChange = useCallback((e) => {
+    setSlicingParams((p) => ({
+      ...p,
+      slicingPlane: e.target.value,
+      singleSliceMode: false,
+      currentLayerIndex: 0, // Reset layer index when plane changes
+    }));
+    setShowMiddleSlice(false); // Disable middle slice when plane changes
+  }, []);
+
+  const handleToggleSlices = useCallback(() => {
+    setSlicingParams((p) => ({ ...p, showSlices: !p.showSlices }));
+  }, []);
+
+  const handleStepChange = useCallback((e) => {
+    const newLayerIndex = parseInt(e.target.value, 10);
+    // Calculate the actual slice coordinate based on the layer index
+    const calculatedSliceValue = getScaledMinRangeValue() + newLayerIndex * slicingParams.sliceHeight;
+
+    setSlicingParams((p) => ({
+      ...p,
+      currentLayerIndex: newLayerIndex,
+      currentSliceValue: calculatedSliceValue, // Update the actual coordinate
+      singleSliceMode: true,
+      showSlices: true,
+    }));
+    setShowMiddleSlice(false); // Disable middle slice when manual slice is adjusted
+  }, [getScaledMinRangeValue, slicingParams.sliceHeight]); // Dependencies for useCallback
+
+  const handleToggleSingleSliceMode = useCallback(() => {
+    setSlicingParams((p) => ({
+      ...p,
+      singleSliceMode: !p.singleSliceMode,
+    }));
+    setShowMiddleSlice(false); // Disable middle slice when toggling single slice mode
+  }, []);
+
+  const handleToggleModelOutline = useCallback(() => {
+    setShowModelOutline(prev => !prev);
+  }, []);
+
+  const handleToggleMiddleSlice = useCallback(() => {
+    setShowMiddleSlice(prev => !prev);
+    setSlicingParams(prev => ({
+      ...prev,
+      singleSliceMode: false,
+      showSlices: true,
+    }));
+  }, []);
+
+  const handleToggleMiniViewer = useCallback(() => {
+    setShowMiniViewer(prev => !prev);
+  }, []);
+
+  const handleTargetDimensionChange = useCallback((dimension) => (e) => {
+    const inputValue = parseFloat(e.target.value);
+    if (isNaN(inputValue) || inputValue <= 0) {
+      return;
+    }
+
+    if (originalDimensions.x === 0 || originalDimensions.y === 0 || originalDimensions.z === 0) {
+        setTargetDimensions(prev => ({
+            ...prev,
+            [dimension]: inputValue
+        }));
+        return;
+    }
+
+    let scaleFactor = 1;
+    if (dimension === 'width') {
+      scaleFactor = inputValue / originalDimensions.x;
+    } else if (dimension === 'height') {
+      scaleFactor = inputValue / originalDimensions.y;
+    } else if (dimension === 'depth') {
+      scaleFactor = inputValue / originalDimensions.z;
+    }
+
+    const newTargetWidth = originalDimensions.x * scaleFactor;
+    const newTargetHeight = originalDimensions.y * scaleFactor;
+    const newTargetDepth = originalDimensions.z * scaleFactor;
+
+    setTargetDimensions({
+      width: newTargetWidth,
+      height: newTargetHeight,
+      depth: newTargetDepth,
+    });
+  }, [originalDimensions]); // Dependencies for useCallback
 
 
   // --- Three.js Scene Initialization (Runs only once) ---
