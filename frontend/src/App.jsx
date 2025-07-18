@@ -1,30 +1,35 @@
 import React, { useState } from "react";
 import STLViewer from "./STLViewer";
 
-const App = () => {
-  const [stlUrl, setStlUrl] = useState(null);
+export default function App() {
+  const [stlFileUrl, setStlFileUrl] = useState(null);
+  const [fileName, setFileName] = useState(null);
 
   const handleFileChange = (event) => {
     const file = event.target.files[0];
-    if (file && file.name.toLowerCase().endsWith(".stl")) {
+    if (file && file.name.endsWith(".stl")) {
       const url = URL.createObjectURL(file);
-      setStlUrl(url);
+      setStlFileUrl(url);
+      setFileName(file.name);
+      console.log("File uploaded:", file.name);
+      console.log("Blob URL:", url);
     } else {
-      alert("Please upload a valid STL file.");
+      alert("Please upload a valid .stl file");
     }
   };
 
   return (
-    <div style={{ height: "100vh", display: "flex", flexDirection: "column" }}>
-      <header style={{ padding: "10px", backgroundColor: "#222", color: "white" }}>
-        <h1>STL Viewer</h1>
-        <input type="file" accept=".stl" onChange={handleFileChange} />
-      </header>
-      <main style={{ flexGrow: 1 }}>
-        <STLViewer stlFile={stlUrl} />
-      </main>
+    <div style={{ padding: 20 }}>
+      <h2>Upload an STL file</h2>
+      <input type="file" accept=".stl" onChange={handleFileChange} />
+      {fileName && <p>Loaded file: {fileName}</p>}
+      <div style={{ height: "600px", marginTop: 20 }}>
+        {stlFileUrl ? (
+          <STLViewer stlFile={stlFileUrl} />
+        ) : (
+          <p>Please upload an STL file to view it.</p>
+        )}
+      </div>
     </div>
   );
-};
-
-export default App;
+}
