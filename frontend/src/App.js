@@ -1,42 +1,73 @@
-import React, { useState } from "react";
+import React, { useRef, useEffect, useState } from "react";
+import * as THREE from "three";
+import { STLLoader } from "three-stdlib";
 
 function App() {
-  const [file, setFile] = useState(null);
-  const [result, setResult] = useState(null);
+  const mountRef = useRef(null);
+  const [scene, setScene] = useState(null);
+  const [renderer, setRenderer] = useState(null);
+  const [camera, setCamera] = useState(null);
 
-  const onFileChange = (e) => {
-    setFile(e.target.files[0]);
-    setResult(null);
-  };
+  useEffect(() => {
+    const width = mountRef.current.clientWidth;
+    const height = mountRef.current.clientHeight;
 
-  const onSubmit = async (e) => {
-    e.preventDefault();
-    if (!file) return alert("Please select an STL file");
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
+    camera.position.z = 5;
 
-    const formData = new FormData();
-    formData.append("file", file);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(width, height);
+    mountRef.current.appendChild(renderer.domElement);
 
-    const response = await fetch("https://slicr-1.onrender.com/", {
-      method: "POST",
-      body: formData,
-    });
-    const data = await response.json();
-    setResult(data);
+    const light = new THREE.DirectionalLight(0xffffff, 1);
+    light.position.set(1, 2, 3);
+    scene.add(light);
+
+    setScene(scene);
+    setCamera(camera);
+    setRenderer(renderer);
+
+    const animate = function () {
+      requestAnimationFrame(animate);
+      renderer.render(scene, camera);
+    };
+
+    animate();
+
+    return () => {
+      mountRef.current.removeChild(renderer.domElement);
+    };
+  }, []);
+
+  const handleFile = (e) => {
+    const file = e.target.files[0];
+    if (!file || !scene) return;
+
+    const reader = new FileReader();
+    reader.onload = function (event) {
+      const contents = event.target.result;
+      const loader = new STLLoader();
+      const geometry = loader.parse(contents);
+
+      const material = new THREE.MeshStandardMaterial({ color: 0x0077ff });
+      const mesh = new THREE.Mesh(geometry, material);
+
+      scene.clear(); // remove old mesh
+      scene.add(mesh);
+    };
+
+    reader.readAsArrayBuffer(file);
   };
 
   return (
-    <div style={{ padding: "2rem" }}>
-      <h1>STL Slicer MVP</h1>
-      <form onSubmit={onSubmit}>
-        <input type="file" accept=".stl" onChange={onFileChange} />
-        <button type="submit">Upload and Slice</button>
-      </form>
-      {result && (
-        <div style={{ marginTop: "1rem" }}>
-          <strong>Response:</strong>
-          <pre>{JSON.stringify(result, null, 2)}</pre>
-        </div>
-      )}
+    <div style={{ padding: "1rem" }}>
+      <h1>Slicr MVP</h1>
+      <input type="file" accept=".stl" onChange={handleFile} />
+      <div
+        ref={mountRef}
+        style={{ width: "100%", height: "500px", border: "1px solid #ccc", marginTop: "1rem" }}
+      />
     </div>
   );
 }
