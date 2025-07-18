@@ -13,9 +13,17 @@ const STLViewer = ({ stlFile }) => {
   // --- 1. Model and Geometry State ---
   const mountRef = useRef(null); // Ref for the main viewer
   const miniViewerMountRef = useRef(null); // Ref for the mini-viewer
-  const [sceneState, setSceneState] = useState({ scene: null, renderer: null, camera: null, controls: null });
-  // miniViewerState no longer needs controls as they are synchronized
-  const [miniViewerState, setMiniViewerState] = useState({ scene: null, renderer: null, camera: null });
+  
+  // Using refs for Three.js objects to prevent re-initialization on every render
+  const sceneRef = useRef(null);
+  const rendererRef = useRef(null);
+  const cameraRef = useRef(null);
+  const controlsRef = useRef(null);
+
+  const miniSceneRef = useRef(null);
+  const miniRendererRef = useRef(null);
+  const miniCameraRef = useRef(null);
+
   const [geometry, setGeometry] = useState(null);
   const [originalDimensions, setOriginalDimensions] = useState({ x: 0, y: 0, z: 0 });
   const [targetDimensions, setTargetDimensions] = useState({ width: 0, height: 0, depth: 0 });
@@ -51,12 +59,12 @@ const STLViewer = ({ stlFile }) => {
 
     workerInstanceRef.current.onmessage = (event) => {
       const { type, payload } = event.data;
-      if (type === 'slicingComplete') {
+      if (type === 'slicingComplete' && sceneRef.current) { // Ensure sceneRef.current is available
         // Clear old slices before rendering new ones
-        clearSlices(sceneState.scene);
+        clearSlices(sceneRef.current);
         
         payload.forEach(sliceData => {
-          const { value: slicePlaneValue, contours, isFallback, plane } = sliceData;
+          const { contours, isFallback } = sliceData;
           
           if (contours.length === 0) return;
 
@@ -97,7 +105,7 @@ const STLViewer = ({ stlFile }) => {
           }
           
           sliceLine.name = "sliceLine";
-          sceneState.scene.add(sliceLine);
+          sceneRef.current.add(sliceLine); // Add slices to the main scene
         });
       }
     };
@@ -108,8 +116,7 @@ const STLViewer = ({ stlFile }) => {
     // For performance, a single shared worker is often better for this kind of task.
     // However, if the worker needs to be reset or if multiple instances are needed,
     // you would manage its lifecycle within this useEffect.
-  }, [sceneState.scene]);
-
+  }, []); // Empty dependency array means this runs once on mount
 
   // Custom debounce hook for slicing parameters
   useEffect(() => {
@@ -196,7 +203,6 @@ const STLViewer = ({ stlFile }) => {
   const handleTargetDimensionChange = (dimension) => (e) => {
     const inputValue = parseFloat(e.target.value);
     if (isNaN(inputValue) || inputValue <= 0) {
-      // Optionally reset to original or prevent update if invalid
       // For proportional scaling, if input is invalid, it's better to revert to current
       // or simply not update, to avoid breaking aspect ratio with 0 or NaN.
       return;
@@ -235,26 +241,24 @@ const STLViewer = ({ stlFile }) => {
   };
 
 
-  // --- Main Scene Setup and Render ---
+  // --- Main Scene Setup ---
   useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return;
 
+    // Cleanup previous scene elements if they exist
     while (mount.firstChild) {
       mount.removeChild(mount.firstChild);
     }
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x1a1a1a);
-
     const camera = new THREE.PerspectiveCamera(75, mount.clientWidth / mount.clientHeight, 0.1, 1000);
     camera.position.set(0, 0, 100);
-
-    const renderer = new THREE.WebGLRenderer({ antialias: true }); // Enable anti-aliasing
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     mount.appendChild(renderer.domElement);
-
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.05;
@@ -264,52 +268,62 @@ const STLViewer = ({ stlFile }) => {
     directionalLight.position.set(50, 50, 100).normalize();
     scene.add(directionalLight);
 
-    setSceneState({ scene, renderer, camera, controls });
+    sceneRef.current = scene;
+    rendererRef.current = renderer;
+    cameraRef.current = camera;
+    controlsRef.current = controls;
 
     const handleResize = () => {
-      if (mount) {
-        camera.aspect = mount.clientWidth / mount.clientHeight;
-        camera.updateProjectionMatrix();
-        renderer.setSize(mount.clientWidth, mount.clientHeight);
+      if (cameraRef.current && rendererRef.current && mountRef.current) {
+        cameraRef.current.aspect = mountRef.current.clientWidth / mountRef.current.clientHeight;
+        cameraRef.current.updateProjectionMatrix();
+        rendererRef.current.setSize(mountRef.current.clientWidth, mountRef.current.clientHeight);
       }
-      // Mini-viewer resize handled in its own useEffect
     };
-    window.addEventListener("resize", handleResize);
+    // Use { passive: true } for scroll-blocking event listeners where appropriate
+    window.addEventListener("resize", handleResize, { passive: true });
 
+    // Single animation loop for both viewers
+    let animationFrameId;
     const animate = () => {
-      requestAnimationFrame(animate);
-      controls.update();
-      renderer.render(scene, camera);
+      animationFrameId = requestAnimationFrame(animate);
+
+      if (controlsRef.current) controlsRef.current.update();
+      if (rendererRef.current && sceneRef.current && cameraRef.current) {
+        rendererRef.current.render(sceneRef.current, cameraRef.current);
+      }
 
       // Synchronize mini-viewer camera with main camera
-      if (showMiniViewer && miniViewerState.renderer && miniViewerState.scene && miniViewerState.camera && sceneState.camera && sceneState.controls) {
-        miniViewerState.camera.position.copy(sceneState.camera.position);
-        miniViewerState.camera.quaternion.copy(sceneState.camera.quaternion);
+      if (showMiniViewer && miniRendererRef.current && miniSceneRef.current && miniCameraRef.current && cameraRef.current && controlsRef.current) {
+        miniCameraRef.current.position.copy(cameraRef.current.position);
+        miniCameraRef.current.quaternion.copy(cameraRef.current.quaternion);
         // Ensure mini-viewer looks at the same target as main viewer
-        miniViewerState.camera.lookAt(sceneState.controls.target);
-        miniViewerState.renderer.render(miniViewerState.scene, miniViewerState.camera);
+        miniCameraRef.current.lookAt(controlsRef.current.target);
+        miniRendererRef.current.render(miniSceneRef.current, miniCameraRef.current);
       }
     };
-    animate();
+    animate(); // Start the single animation loop
 
     return () => {
       window.removeEventListener("resize", handleResize);
-      controls.dispose();
-      renderer.dispose();
+      if (controlsRef.current) controlsRef.current.dispose();
+      if (rendererRef.current) rendererRef.current.dispose();
+      cancelAnimationFrame(animationFrameId); // Stop the animation loop
     };
-  }, [showMiniViewer, sceneState.camera, sceneState.controls, miniViewerState.camera, miniViewerState.renderer, miniViewerState.scene]); // Added miniViewerState dependencies for sync
-
+  }, [showMiniViewer]); // showMiniViewer is still a dependency because the mini-viewer rendering is conditional inside the main animate loop.
 
   // --- Mini-Viewer Setup (Independent from main viewer's useEffect) ---
   useEffect(() => {
     const miniViewerMount = miniViewerMountRef.current;
     if (!miniViewerMount) return;
 
-    // If mini-viewer is not supposed to be shown, clean up and return
     if (!showMiniViewer) {
-      if (miniViewerState.renderer) {
-        miniViewerState.renderer.dispose();
-        setMiniViewerState({ scene: null, renderer: null, camera: null });
+      // Cleanup mini-viewer when it's hidden
+      if (miniRendererRef.current) {
+        miniRendererRef.current.dispose();
+        miniRendererRef.current = null;
+        miniSceneRef.current = null;
+        miniCameraRef.current = null;
       }
       return;
     }
@@ -335,27 +349,49 @@ const STLViewer = ({ stlFile }) => {
     miniRenderer.setSize(miniViewerMount.clientWidth, miniViewerMount.clientHeight);
     miniViewerMount.appendChild(miniRenderer.domElement);
 
-    setMiniViewerState({ scene: miniScene, renderer: miniRenderer, camera: miniCamera });
+    miniSceneRef.current = miniScene;
+    miniRendererRef.current = miniRenderer;
+    miniCameraRef.current = miniCamera;
+
+    // Add the model to the mini-viewer if geometry is already loaded
+    if (geometry) {
+      const miniMesh = new THREE.Mesh(geometry, new THREE.MeshPhongMaterial({ color: 0x00aaff, transparent: false, opacity: 1 }));
+      const center = new THREE.Vector3();
+      geometry.boundingBox.getCenter(center);
+      miniMesh.position.sub(center);
+      miniMesh.name = "miniStlMesh";
+      miniMesh.scale.set(currentScale.x, currentScale.y, currentScale.z); // Apply current scale
+      miniScene.add(miniMesh);
+
+      const size = new THREE.Vector3();
+      geometry.boundingBox.getSize(size);
+      size.x *= currentScale.x; size.y *= currentScale.y; size.z *= currentScale.z;
+      const maxDim = Math.max(size.x, size.y, size.z);
+      const fov = miniCamera.fov * (Math.PI / 180);
+      let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
+      cameraZ *= 1.5;
+      miniCamera.position.set(center.x * currentScale.x, center.y * currentScale.y, center.z * currentScale.z + cameraZ);
+      miniCamera.lookAt(center.x * currentScale.x, center.y * currentScale.y, center.z * currentScale.z);
+    }
 
     const handleMiniResize = () => {
-      if (miniViewerMount && miniCamera && miniRenderer) {
-        miniCamera.aspect = miniViewerMount.clientWidth / miniViewerMount.clientHeight;
-        miniCamera.updateProjectionMatrix();
-        miniRenderer.setSize(miniViewerMount.clientWidth, miniViewerMount.clientHeight);
+      if (miniCameraRef.current && miniRendererRef.current && miniViewerMountRef.current) {
+        miniCameraRef.current.aspect = miniViewerMountRef.current.clientWidth / miniViewerMountRef.current.clientHeight;
+        miniCameraRef.current.updateProjectionMatrix();
+        miniRendererRef.current.setSize(miniViewerMountRef.current.clientWidth, miniViewerMountRef.current.clientHeight);
       }
     };
-    window.addEventListener("resize", handleMiniResize);
+    window.addEventListener("resize", handleMiniResize, { passive: true });
 
     return () => {
       window.removeEventListener("resize", handleMiniResize);
-      if (miniRenderer) miniRenderer.dispose();
+      // Cleanup is handled by the `if (!showMiniViewer)` block
     };
-  }, [showMiniViewer]); // Re-run this effect when showMiniViewer changes
+  }, [showMiniViewer, geometry, currentScale]); // Added geometry and currentScale to dependencies for mini-viewer mesh update
 
-
-  // --- 1. STL Loader & Mesh Setup ---
+  // --- STL Loader & Mesh Setup (for both viewers) ---
   useEffect(() => {
-    if (!sceneState.scene || !stlFile) return;
+    if (!sceneRef.current || !stlFile) return;
 
     const loader = new STLLoader();
     loader.load(stlFile, (loadedGeometry) => {
@@ -365,104 +401,101 @@ const STLViewer = ({ stlFile }) => {
       const initialSize = new THREE.Vector3();
       loadedGeometry.boundingBox.getSize(initialSize);
       setOriginalDimensions({ x: initialSize.x, y: initialSize.y, z: initialSize.z });
-      // Initialize target dimensions to original dimensions when a new model is loaded
       setTargetDimensions({ width: initialSize.x, height: initialSize.y, depth: initialSize.z });
 
-      // Changed material to be fully opaque
       const material = new THREE.MeshPhongMaterial({
         color: 0x00aaff,
-        transparent: false, // Ensure not transparent
-        opacity: 1,         // Ensure full opacity
+        transparent: false,
+        opacity: 1,
       });
       const mesh = new THREE.Mesh(loadedGeometry, material);
-
       const center = new THREE.Vector3();
       loadedGeometry.boundingBox.getCenter(center);
       mesh.position.sub(center);
       mesh.name = "stlMesh";
-      
-      const scene = sceneState.scene;
-      const existingMesh = scene.getObjectByName("stlMesh");
+
+      // Remove previous mesh and outline from main scene
+      const existingMesh = sceneRef.current.getObjectByName("stlMesh");
       if (existingMesh) {
-        scene.remove(existingMesh);
+        sceneRef.current.remove(existingMesh);
         if (existingMesh.geometry) existingMesh.geometry.dispose();
         if (existingMesh.material) existingMesh.material.dispose();
       }
-      scene.add(mesh);
-
-      // --- Add Model Outline Logic ---
-      const existingOutline = scene.getObjectByName("modelOutline");
+      const existingOutline = sceneRef.current.getObjectByName("modelOutline");
       if (existingOutline) {
-        scene.remove(existingOutline);
+        sceneRef.current.remove(existingOutline);
         if (existingOutline.geometry) existingOutline.geometry.dispose();
         if (existingOutline.material) existingOutline.material.dispose();
       }
+      sceneRef.current.add(mesh);
 
-      // Create EdgesGeometry for clean outlines
-      const edges = new THREE.EdgesGeometry(loadedGeometry, 30); // Threshold angle 30 degrees
+      const edges = new THREE.EdgesGeometry(loadedGeometry, 30);
       const outlineMaterial = new THREE.LineBasicMaterial({
-        color: 0x000000, // Black outlines
-        linewidth: 2, // Note: linewidth often ignored by WebGL, usually renders as 1px
+        color: 0x000000,
+        linewidth: 2,
         transparent: true,
         opacity: 0.8,
-        depthTest: true,  // Crucial: only draw if in front of existing geometry
-        depthWrite: false // Crucial: don't write to depth buffer, allows mesh to obscure lines behind it
+        depthTest: true,
+        depthWrite: false
       });
       const modelOutlines = new THREE.LineSegments(edges, outlineMaterial);
       modelOutlines.name = "modelOutline";
-      modelOutlines.visible = showModelOutline; // Control visibility based on state
-      scene.add(modelOutlines);
-      // --- End Model Outline Logic ---
+      sceneRef.current.add(modelOutlines);
 
-      // --- Add model to mini-viewer ---
-      if (miniViewerState.scene) {
-        const miniMesh = mesh.clone(); // Clone the mesh for the mini-viewer
+      // Add/update mesh in mini-viewer if it's active
+      if (miniSceneRef.current) {
+        const miniMesh = mesh.clone();
         miniMesh.name = "miniStlMesh";
-        const existingMiniMesh = miniViewerState.scene.getObjectByName("miniStlMesh");
+        const existingMiniMesh = miniSceneRef.current.getObjectByName("miniStlMesh");
         if (existingMiniMesh) {
-          miniViewerState.scene.remove(existingMiniMesh);
+          miniSceneRef.current.remove(existingMiniMesh);
           if (existingMiniMesh.geometry) existingMiniMesh.geometry.dispose();
           if (existingMiniMesh.material) existingMiniMesh.material.dispose();
         }
-        miniViewerState.scene.add(miniMesh);
+        miniSceneRef.current.add(miniMesh);
 
         // Position mini-viewer camera
-        if (miniViewerState.camera) { // miniViewerState.controls is not used here for positioning
+        if (miniCameraRef.current) { // miniViewerState.controls is not used here for positioning
           const size = new THREE.Vector3();
           loadedGeometry.boundingBox.getSize(size);
           const maxDim = Math.max(size.x, size.y, size.z);
-          const fov = miniViewerState.camera.fov * (Math.PI / 180);
+          const fov = miniCameraRef.current.fov * (Math.PI / 180);
           let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
           cameraZ *= 1.5;
-          miniViewerState.camera.position.set(center.x, center.y, center.z + cameraZ);
-          miniViewerState.camera.lookAt(center);
+          miniCameraRef.current.position.set(center.x, center.y, center.z + cameraZ);
+          miniCameraRef.current.lookAt(center);
         }
       }
 
-      // Camera and controls will be updated by the scaling useEffect
-    },
-    undefined,
-    (error) => {
-      // Using console.log instead of alert() as per instructions
+      // Initial camera positioning for main viewer
+      if (cameraRef.current && controlsRef.current) {
+        const size = new THREE.Vector3();
+        loadedGeometry.boundingBox.getSize(size);
+        const maxDim = Math.max(size.x, size.y, size.z);
+        const fov = cameraRef.current.fov * (Math.PI / 180);
+        let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
+        cameraZ *= 1.5;
+        cameraRef.current.position.set(center.x, center.y, center.z + cameraZ);
+        cameraRef.current.lookAt(center);
+        controlsRef.current.target.copy(center);
+        controlsRef.current.update();
+      }
+    }, undefined, (error) => {
       console.error("Error loading STL file:", error);
     });
-  }, [stlFile, sceneState.scene, showModelOutline, miniViewerState.scene, miniViewerState.camera]); // Added miniViewerState.camera to dependencies
-
+  }, [stlFile, sceneRef, miniSceneRef, miniCameraRef]); // Dependencies adjusted
 
   // --- Effect to handle model scaling and camera adjustment (main and mini-viewer) ---
   useEffect(() => {
-    if (!geometry || !sceneState.scene || originalDimensions.x === 0 || originalDimensions.y === 0 || originalDimensions.z === 0) {
-      // If original dimensions are zero, or geometry/scene not ready, cannot calculate scale
+    if (!geometry || !sceneRef.current || originalDimensions.x === 0 || originalDimensions.y === 0 || originalDimensions.z === 0) {
       return;
     }
 
-    const mesh = sceneState.scene.getObjectByName("stlMesh");
-    const miniMesh = miniViewerState.scene ? miniViewerState.scene.getObjectByName("miniStlMesh") : null;
+    const mesh = sceneRef.current.getObjectByName("stlMesh");
+    const miniMesh = miniSceneRef.current ? miniSceneRef.current.getObjectByName("miniStlMesh") : null;
     if (!mesh) return;
 
     let newScaleX = 1, newScaleY = 1, newScaleZ = 1;
-
-    // Calculate scales based on target dimensions relative to original dimensions
     if (originalDimensions.x > 0 && targetDimensions.width > 0) {
       newScaleX = targetDimensions.width / originalDimensions.x;
     }
@@ -473,39 +506,36 @@ const STLViewer = ({ stlFile }) => {
       newScaleZ = targetDimensions.depth / originalDimensions.z;
     }
 
-    // Apply scale to the main mesh
     mesh.scale.set(newScaleX, newScaleY, newScaleZ);
-    // Apply scale to the mini-viewer mesh if it exists
     if (miniMesh) {
       miniMesh.scale.set(newScaleX, newScaleY, newScaleZ);
     }
-    setCurrentScale({ x: newScaleX, y: newScaleY, z: newScaleZ }); // Store actual applied scale
-
+    setCurrentScale({ x: newScaleX, y: newScaleY, z: newScaleZ });
 
     // Update camera and controls based on new scale for main viewer
-    if (sceneState.camera && sceneState.controls) {
+    if (cameraRef.current && controlsRef.current) {
       const scaledSize = new THREE.Vector3(
         originalDimensions.x * newScaleX,
         originalDimensions.y * newScaleY,
         originalDimensions.z * newScaleZ
       );
       const scaledCenter = new THREE.Vector3();
-      geometry.boundingBox.getCenter(scaledCenter); // Get original center
-      scaledCenter.multiply(new THREE.Vector3(newScaleX, newScaleY, newScaleZ)); // Scale the center
+      geometry.boundingBox.getCenter(scaledCenter);
+      scaledCenter.multiply(new THREE.Vector3(newScaleX, newScaleY, newScaleZ));
 
       const maxDim = Math.max(scaledSize.x, scaledSize.y, scaledSize.z);
-      const fov = sceneState.camera.fov * (Math.PI / 180);
+      const fov = cameraRef.current.fov * (Math.PI / 180);
       let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
-      cameraZ *= 1.5; // Add some padding
+      cameraZ *= 1.5;
 
-      sceneState.camera.position.set(scaledCenter.x, scaledCenter.y, scaledCenter.z + cameraZ);
-      sceneState.camera.lookAt(scaledCenter);
-      sceneState.controls.target.copy(scaledCenter);
-      sceneState.controls.update();
+      cameraRef.current.position.set(scaledCenter.x, scaledCenter.y, scaledCenter.z + cameraZ);
+      cameraRef.current.lookAt(scaledCenter);
+      controlsRef.current.target.copy(scaledCenter);
+      controlsRef.current.update();
     }
 
-    // Update camera for mini-viewer as well (no controls needed here)
-    if (miniViewerState.camera && miniMesh) {
+    // Update camera for mini-viewer as well
+    if (miniCameraRef.current && miniMesh) {
       const scaledSize = new THREE.Vector3();
       geometry.boundingBox.getSize(scaledSize);
       scaledSize.multiply(new THREE.Vector3(newScaleX, newScaleY, newScaleZ));
@@ -515,67 +545,61 @@ const STLViewer = ({ stlFile }) => {
       scaledCenter.multiply(new THREE.Vector3(newScaleX, newScaleY, newScaleZ));
 
       const maxDim = Math.max(scaledSize.x, scaledSize.y, scaledSize.z);
-      const fov = miniViewerState.camera.fov * (Math.PI / 180);
+      const fov = miniCameraRef.current.fov * (Math.PI / 180);
       let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
       cameraZ *= 1.5;
 
-      miniViewerState.camera.position.set(scaledCenter.x, scaledCenter.y, scaledCenter.z + cameraZ);
-      miniViewerState.camera.lookAt(scaledCenter);
+      miniCameraRef.current.position.set(scaledCenter.x, scaledCenter.y, scaledCenter.z + cameraZ);
+      miniCameraRef.current.lookAt(scaledCenter);
     }
 
-
-    // Update slicingParams with the new scale factors
     setSlicingParams(prev => ({
       ...prev,
       scaleX: newScaleX,
       scaleY: newScaleY,
       scaleZ: newScaleZ,
-      currentLayerIndex: 0, // Reset layer index on scale change
+      currentLayerIndex: 0,
     }));
-    setShowMiddleSlice(false); // Disable middle slice on scale change
-
-  }, [targetDimensions, originalDimensions, geometry, sceneState.scene, sceneState.camera, sceneState.controls, miniViewerState.scene, miniViewerState.camera]);
-
+    setShowMiddleSlice(false);
+  }, [targetDimensions, originalDimensions, geometry, sceneRef, cameraRef, controlsRef, miniSceneRef, miniCameraRef]);
 
   // --- Effect to update model outline visibility when showModelOutline changes ---
   useEffect(() => {
-    if (sceneState.scene) {
-      const modelOutline = sceneState.scene.getObjectByName("modelOutline");
+    if (sceneRef.current) {
+      const modelOutline = sceneRef.current.getObjectByName("modelOutline");
       if (modelOutline) {
         modelOutline.visible = showModelOutline;
       }
     }
-  }, [showModelOutline, sceneState.scene]);
+  }, [showModelOutline, sceneRef]);
 
   // --- Effect to toggle main model visibility based on showMiniViewer ---
   useEffect(() => {
-    if (sceneState.scene) {
-      const stlMesh = sceneState.scene.getObjectByName("stlMesh");
-      const modelOutline = sceneState.scene.getObjectByName("modelOutline");
+    if (sceneRef.current) {
+      const stlMesh = sceneRef.current.getObjectByName("stlMesh");
+      const modelOutline = sceneRef.current.getObjectByName("modelOutline");
       if (stlMesh) {
-        stlMesh.visible = !showMiniViewer; // Hide if mini-viewer is shown
+        stlMesh.visible = !showMiniViewer;
       }
       if (modelOutline) {
-        modelOutline.visible = !showMiniViewer && showModelOutline; // Hide if mini-viewer is shown, also respect showModelOutline
+        modelOutline.visible = !showMiniViewer && showModelOutline;
       }
     }
-  }, [showMiniViewer, sceneState.scene, showModelOutline]);
-
+  }, [showMiniViewer, sceneRef, showModelOutline]);
 
   // --- Send slicing request to worker when debounced params or geometry change ---
   useEffect(() => {
-    if (geometry && sceneState.scene && workerInstanceRef.current) {
-      clearSlices(sceneState.scene); // Clear old slices immediately
+    if (geometry && sceneRef.current && workerInstanceRef.current) {
+      clearSlices(sceneRef.current);
       
       let sliceValueToRender = null;
       let showSlicesForWorker = debouncedSlicingParams.showSlices;
 
       if (showMiddleSlice && geometry.boundingBox) {
-        // Calculate middle slice value based on scaled bounding box
         const bboxMin = getScaledMinRangeValue(geometry, debouncedSlicingParams.slicingPlane, currentScale.x, currentScale.y, currentScale.z);
         const bboxMax = getScaledMaxRangeValue(geometry, debouncedSlicingParams.slicingPlane, currentScale.x, currentScale.y, currentScale.z);
         sliceValueToRender = (bboxMin + bboxMax) / 2;
-        showSlicesForWorker = true; // Ensure slices are shown if middle slice is active
+        showSlicesForWorker = true;
       } else if (debouncedSlicingParams.singleSliceMode) {
         sliceValueToRender = debouncedSlicingParams.currentSliceValue;
       }
@@ -583,29 +607,28 @@ const STLViewer = ({ stlFile }) => {
       if (showSlicesForWorker) {
         const positionArrayCopy = new Float32Array(geometry.attributes.position.array);
         const bboxData = {
-          min: geometry.boundingBox.min.toArray(), // Original unscaled bbox data
-          max: geometry.boundingBox.max.toArray(), // Original unscaled bbox data
+          min: geometry.boundingBox.min.toArray(),
+          max: geometry.boundingBox.max.toArray(),
         };
 
         workerInstanceRef.current.postMessage({
           type: 'sliceModel',
           payload: {
-            positionArray: positionArrayCopy, // Send the copy
+            positionArray: positionArrayCopy,
             bboxData: bboxData,
             sliceHeight: debouncedSlicingParams.sliceHeight,
-            currentSlice: sliceValueToRender, // Pass the calculated or selected slice value
+            currentSlice: sliceValueToRender,
             slicingPlane: debouncedSlicingParams.slicingPlane,
-            scaleX: currentScale.x, // Pass current actual scale factors to worker
+            scaleX: currentScale.x,
             scaleY: currentScale.y,
             scaleZ: currentScale.z,
           }
         });
       }
     }
-  }, [debouncedSlicingParams, geometry, sceneState.scene, showMiddleSlice, currentScale]);
+  }, [debouncedSlicingParams, geometry, sceneRef, showMiddleSlice, currentScale]);
 
-
-  // --- 6. Utility Functions ---
+  // --- Utility Functions ---
   const clearSlices = (scene) => {
     const slices = scene.children.filter((child) => child.name === "sliceLine");
     slices.forEach((line) => {
@@ -615,7 +638,6 @@ const STLViewer = ({ stlFile }) => {
     });
   };
 
-  // Helper to get scaled min range value
   const getScaledMinRangeValue = useCallback((geom = geometry, plane = slicingParams.slicingPlane, scaleX = currentScale.x, scaleY = currentScale.y, scaleZ = currentScale.z) => {
     if (!geom || !geom.boundingBox) return 0;
     const minVal = geom.boundingBox.min[plane.toLowerCase()];
@@ -625,7 +647,6 @@ const STLViewer = ({ stlFile }) => {
     return minVal;
   }, [geometry, slicingParams.slicingPlane, currentScale]);
 
-  // Helper to get scaled max range value
   const getScaledMaxRangeValue = useCallback((geom = geometry, plane = slicingParams.slicingPlane, scaleX = currentScale.x, scaleY = currentScale.y, scaleZ = currentScale.z) => {
     if (!geom || !geom.boundingBox) return 100;
     const maxVal = geom.boundingBox.max[plane.toLowerCase()];
@@ -635,11 +656,10 @@ const STLViewer = ({ stlFile }) => {
     return maxVal;
   }, [geometry, slicingParams.slicingPlane, currentScale]);
 
-
-  // --- 5. Export Functions ---
+  // --- Export Functions ---
   const exportSVG = () => {
-    if (!sceneState.scene) return;
-    const lines = sceneState.scene.children.filter((child) => child.name === "sliceLine");
+    if (!sceneRef.current) return;
+    const lines = sceneRef.current.children.filter((child) => child.name === "sliceLine");
     if (lines.length === 0) return;
 
     let currentXOffset = 0;
@@ -648,7 +668,7 @@ const STLViewer = ({ stlFile }) => {
     let overallMaxX = -Infinity;
     let overallMaxY = -Infinity;
 
-    const slicesToExport = []; // Store processed slice data for export
+    const slicesToExport = [];
 
     lines.forEach((line) => {
       const pos = line.geometry.attributes.position;
@@ -668,15 +688,14 @@ const STLViewer = ({ stlFile }) => {
 
         let px1, py1, px2, py2;
 
-        // Project 3D points to 2D plane based on slicingPlane
         if (slicingParams.slicingPlane === "Z") {
           px1 = p1x; py1 = p1y;
           px2 = p2x; py2 = p2y;
         } else if (slicingParams.slicingPlane === "X") {
-          px1 = p1z; py1 = p1y; // X-plane, so use Z and Y coordinates
+          px1 = p1z; py1 = p1y;
           px2 = p2z; py2 = p2y;
-        } else { // Y plane
-          px1 = p1x; py1 = p1z; // Y-plane, so use X and Z coordinates
+        } else {
+          px1 = p1x; py1 = p1z;
           px2 = p2x; py2 = p2z;
         }
 
@@ -696,19 +715,18 @@ const STLViewer = ({ stlFile }) => {
           segments: segmentsForThisSlice,
           color: line.material.color.getHexString(),
           offsetX: currentXOffset,
-          offsetY: 0, // For a single row layout
-          sliceMinX: sliceMinX, // Original min X for this slice
-          sliceMinY: sliceMinY, // Original min Y for this slice
-          sliceHeight: sliceHeight // Height of this slice
+          offsetY: 0,
+          sliceMinX: sliceMinX,
+          sliceMinY: sliceMinY,
+          sliceHeight: sliceHeight
         });
 
-        // Update overall bounding box for viewBox calculation
         overallMinX = Math.min(overallMinX, currentXOffset + sliceMinX);
         overallMaxX = Math.max(overallMaxX, currentXOffset + sliceMaxX);
-        overallMinY = Math.min(overallMinY, sliceMinY); // No offsetY for Y bounds
-        overallMaxY = Math.max(overallMaxY, sliceMaxY); // No offsetY for Y bounds
+        overallMinY = Math.min(overallMinY, sliceMinY);
+        overallMaxY = Math.max(overallMaxY, sliceMaxY);
 
-        currentXOffset += sliceWidth + 10; // Add 10mm spacing
+        currentXOffset += sliceWidth + 10;
       }
     });
 
@@ -724,9 +742,8 @@ const STLViewer = ({ stlFile }) => {
       });
     });
 
-    // Calculate final viewBox based on overall min/max
     const finalViewBoxMinX = overallMinX;
-    const finalViewBoxMinY = -overallMaxY; // Invert Y for SVG viewBox
+    const finalViewBoxMinY = -overallMaxY;
     const finalViewBoxWidth = overallMaxX - overallMinX;
     const finalViewBoxHeight = overallMaxY - overallMinY;
 
@@ -742,24 +759,24 @@ ${svgPaths}
   };
 
   const exportDXF = () => {
-    if (!sceneState.scene) return;
-    const lines = sceneState.scene.children.filter((child) => child.name === "sliceLine");
+    if (!sceneRef.current) return;
+    const lines = sceneRef.current.children.filter((child) => child.name === "sliceLine");
     if (lines.length === 0) return;
 
     let currentXOffset = 0;
-    const slicesToExport = []; // Store processed slice data for export
+    const slicesToExport = [];
 
     lines.forEach((line) => {
       const pos = line.geometry.attributes.position;
       const segmentsForThisSlice = [];
-      let sliceMinX = Infinity, sliceMaxX = -Infinity; // Only need X for width calculation
+      let sliceMinX = Infinity, sliceMaxX = -Infinity;
 
-      for (let i = 0; i < pos.count; i += 2) { // Iterate by 2 for start and end of each segment
+      for (let i = 0; i < pos.count; i += 2) {
         const p1x = pos.getX(i);
         const p1y = pos.getY(i);
         const p1z = pos.getZ(i);
 
-        if (i + 1 >= pos.count) continue; 
+        if (i + 1 >= pos.count) continue;
         
         const p2x = pos.getX(i + 1);
         const p2y = pos.getY(i + 1);
@@ -768,15 +785,14 @@ ${svgPaths}
         let dx1, dy1, dz1;
         let dx2, dy2, dz2;
 
-        // Project 3D points to 2D plane for DXF
         if (slicingParams.slicingPlane === "Z") {
           dx1 = p1x; dy1 = p1y; dz1 = 0;
           dx2 = p2x; dy2 = p2y; dz2 = 0;
         } else if (slicingParams.slicingPlane === "X") {
-          dx1 = p1z; dy1 = p1y; dz1 = 0; // X-plane, so use Z and Y coordinates
+          dx1 = p1z; dy1 = p1y; dz1 = 0;
           dx2 = p2z; dy2 = p2y; dz2 = 0;
-        } else { // Y plane
-          dx1 = p1x; dy1 = p1z; dz1 = 0; // Y-plane, so use X and Z coordinates
+        } else {
+          dx1 = p1x; dy1 = p1z; dz1 = 0;
           dx2 = p2x; dy2 = p2z; dz2 = 0;
         }
 
@@ -792,10 +808,10 @@ ${svgPaths}
         slicesToExport.push({
           segments: segmentsForThisSlice,
           offsetX: currentXOffset,
-          offsetY: 0 // For a single row layout
+          offsetY: 0
         });
 
-        currentXOffset += sliceWidth + 10; // Add 10mm spacing
+        currentXOffset += sliceWidth + 10;
       }
     });
 
@@ -805,7 +821,6 @@ ${svgPaths}
         const p1 = segment.p1;
         const p2 = segment.p2;
 
-        // Apply offset to X coordinate
         const dx1 = p1[0] + sliceData.offsetX;
         const dy1 = p1[1];
         const dz1 = p1[2];
@@ -814,7 +829,6 @@ ${svgPaths}
         const dy2 = p2[1];
         const dz2 = p2[2];
         
-        // Add a LINE entity for each segment
         dxfContent +=
           `0\nLINE\n8\n0\n10\n${dx1.toFixed(3)}\n20\n${dy1.toFixed(3)}\n30\n${dz1.toFixed(3)}\n11\n${dx2.toFixed(3)}\n21\n${dy2.toFixed(3)}\n31\n${dz2.toFixed(3)}\n`;
       });
@@ -829,14 +843,13 @@ ${svgPaths}
   const maxRangeValue = getScaledMaxRangeValue();
 
   let totalLayers = 0;
-  let currentLayerIndex = slicingParams.currentLayerIndex; // Use from state
+  let currentLayerIndex = slicingParams.currentLayerIndex;
   let modelDimensions = { x: 0, y: 0, z: 0 };
 
   if (geometry && geometry.boundingBox && slicingParams.sliceHeight > 0) {
     const range = maxRangeValue - minRangeValue;
     totalLayers = Math.floor(range / slicingParams.sliceHeight) + 1;
 
-    // Clamp currentLayerIndex to valid range
     currentLayerIndex = Math.max(0, Math.min(totalLayers > 0 ? totalLayers - 1 : 0, slicingParams.currentLayerIndex));
 
     modelDimensions = {
@@ -874,31 +887,31 @@ ${svgPaths}
         <label style={{ marginLeft: 20 }}>
           <input
             type="checkbox"
-            checked={showModelOutline} // Use new state
-            onChange={handleToggleModelOutline} // New handler
+            checked={showModelOutline}
+            onChange={handleToggleModelOutline}
             style={{ marginRight: 5 }}
           />
-          Show Model Outline {/* New UI label */}
+          Show Model Outline
         </label>
 
         <label style={{ marginLeft: 20 }}>
           <input
             type="checkbox"
-            checked={showMiddleSlice} // New state
-            onChange={handleToggleMiddleSlice} // New handler
+            checked={showMiddleSlice}
+            onChange={handleToggleMiddleSlice}
             style={{ marginRight: 5 }}
           />
-          Show Middle Slice {/* New UI label */}
+          Show Middle Slice
         </label>
 
         <label style={{ marginLeft: 20 }}>
           <input
             type="checkbox"
-            checked={showMiniViewer} // New state for mini-viewer
-            onChange={handleToggleMiniViewer} // New handler
+            checked={showMiniViewer}
+            onChange={handleToggleMiniViewer}
             style={{ marginRight: 5 }}
           />
-          Show Model View {/* New UI label for mini-viewer */}
+          Show Model View
         </label>
 
         <label style={{ marginLeft: 20 }}>
@@ -915,7 +928,7 @@ ${svgPaths}
             type="checkbox"
             checked={slicingParams.singleSliceMode}
             onChange={handleToggleSingleSliceMode}
-            disabled={showMiddleSlice} // Disable if middle slice is active
+            disabled={showMiddleSlice}
             style={{ marginRight: 5 }}
           />
           Single Slice Mode
@@ -925,18 +938,17 @@ ${svgPaths}
           Slice Position:
           <input
             type="range"
-            min={0} // Min is now 0 (first layer index)
-            max={totalLayers > 0 ? totalLayers - 1 : 0} // Max is total layers - 1
-            step="1" // Step by 1 for layer index
-            value={currentLayerIndex} // Use currentLayerIndex for the slider
+            min={0}
+            max={totalLayers > 0 ? totalLayers - 1 : 0}
+            step="1"
+            value={currentLayerIndex}
             onChange={handleStepChange}
-            disabled={!geometry || !slicingParams.singleSliceMode || totalLayers <= 1 || showMiddleSlice} // Disable if only 1 layer or middle slice is active
+            disabled={!geometry || !slicingParams.singleSliceMode || totalLayers <= 1 || showMiddleSlice}
             style={{ marginLeft: 5, width: 150 }}
           />
-          <span style={{ marginLeft: 5 }}>{slicingParams.currentSliceValue.toFixed(2)}</span> {/* Display actual coordinate */}
+          <span style={{ marginLeft: 5 }}>{slicingParams.currentSliceValue.toFixed(2)}</span>
         </label>
         
-        {/* New Target Dimension Controls */}
         <label style={{ marginLeft: 20 }}>
           Target Width (mm):
           <input
@@ -1002,7 +1014,7 @@ ${svgPaths}
             height: '25%', 
             border: '1px solid #555', 
             boxShadow: '0 0 10px rgba(0,0,0,0.5)',
-            zIndex: 9 // Ensure it's above the main canvas
+            zIndex: 9
           }} 
         />
       )}
