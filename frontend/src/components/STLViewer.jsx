@@ -412,13 +412,11 @@ const STLViewer = ({ stlFile }) => {
       svgPaths += `<path d="${pathD}" stroke="red" stroke-width="0.05" fill="none"/>`;
     });
 
-    const viewBoxX = minX;
-    const viewBoxY = -maxY; // Invert maxY for SVG's Y-axis
-    const viewBoxWidth = maxX - minX;
-    const viewBoxHeight = maxY - minY;
+    // Calculate the viewBox string separately to avoid complex inline expression
+    const viewBoxString = `${minX.toFixed(3)} ${(-maxY).toFixed(3)} ${(maxX - minX).toFixed(3)} ${(maxY - minY).toFixed(3)}`;
 
     const svgContent = `<?xml version="1.0" standalone="no"?>
-<svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="${viewBoxX.toFixed(3)} ${viewBoxY.toFixed(3)} ${viewBoxWidth.toFixed(3)} ${viewBoxHeight.toFixed(3)}">
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="${viewBoxString}">
 ${svgPaths}
 </svg>`;
 
@@ -471,14 +469,30 @@ ${svgPaths}
     saveAs(blob, "slice.dxf");
   };
 
-  // Calculate min/max for the slider outside JSX to simplify expressions
+  // Calculate min/max for the slider (numerical values)
   const minRangeValue = geometry && geometry.boundingBox
-    ? geometry.boundingBox.min[slicingParams.slicingPlane.toLowerCase()].toFixed(2)
+    ? geometry.boundingBox.min[slicingParams.slicingPlane.toLowerCase()]
     : 0;
 
   const maxRangeValue = geometry && geometry.boundingBox
-    ? geometry.boundingBox.max[slicingParams.slicingPlane.toLowerCase()].toFixed(2)
+    ? geometry.boundingBox.max[slicingParams.slicingPlane.toLowerCase()]
     : 100;
+
+  // Calculate total layers and current layer index for display
+  let totalLayers = 0;
+  let currentLayerIndex = 0;
+
+  if (geometry && geometry.boundingBox && slicingParams.sliceHeight > 0) {
+    const range = maxRangeValue - minRangeValue;
+    totalLayers = Math.floor(range / slicingParams.sliceHeight) + 1; // +1 because it's count, not index
+
+    // Calculate current layer index based on currentSlice and sliceHeight
+    // Ensure currentSlice is within the min/max range for calculation
+    const clampedCurrentSlice = Math.max(minRangeValue, Math.min(maxRangeValue, slicingParams.currentSlice));
+    currentLayerIndex = Math.floor((clampedCurrentSlice - minRangeValue) / slicingParams.sliceHeight);
+    // Ensure index is within bounds [0, totalLayers - 1]
+    currentLayerIndex = Math.max(0, Math.min(totalLayers - 1, currentLayerIndex));
+  }
 
   // --- UI Render ---
   return (
@@ -529,17 +543,22 @@ ${svgPaths}
           Slice Position:
           <input
             type="range"
-            min={minRangeValue} {/* Using pre-calculated value */}
-            max={maxRangeValue} {/* Using pre-calculated value */}
+            min={minRangeValue}
+            max={maxRangeValue}
             step="0.1"
             value={slicingParams.currentSlice}
             onChange={handleStepChange}
-            disabled={!geometry || !slicingParams.singleSliceMode} {/* Disable if no geometry or not in single slice mode */}
+            disabled={!geometry || !slicingParams.singleSliceMode}
             style={{ marginLeft: 5, width: 150 }}
           />
           <span style={{ marginLeft: 5 }}>{slicingParams.currentSlice.toFixed(2)}</span>
         </label>
 
+        {geometry && ( // Only show layer info if a geometry is loaded
+          <span style={{ marginLeft: 20, fontSize: '0.9em' }}>
+            Total Layers: {totalLayers} | Current Layer: {currentLayerIndex + 1}
+          </span>
+        )}
 
         <button onClick={exportSVG} style={{ marginLeft: 20, padding: '5px 10px', cursor: 'pointer' }}>
           Export SVG
@@ -548,7 +567,7 @@ ${svgPaths}
           Export DXF
         </button>
       </div>
-      <div ref={mountRef} style={{ width: "100%", height: "calc(100vh - 50px)" }} /> {/* Adjust height based on controls */}
+      <div ref={mountRef} style={{ width: "100%", height: "calc(100vh - 50px)" }} />
     </div>
   );
 };
