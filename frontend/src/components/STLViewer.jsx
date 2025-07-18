@@ -4,35 +4,25 @@ import { STLLoader } from "three-stdlib";
 import { OrbitControls } from "three-stdlib";
 import { saveAs } from "file-saver";
 
-const STLViewer = () => {
+const STLViewer = ({ stlFile }) => {
   const mountRef = useRef(null);
   const [sceneReady, setSceneReady] = useState(false);
   const [sceneState, setSceneState] = useState({ scene: null, renderer: null });
   const [geometry, setGeometry] = useState(null);
-  const [stlFile, setStlFile] = useState(null);
   const [slicingParams, setSlicingParams] = useState({
     sliceHeight: 2,
     showSlices: true,
-    currentSlicePos: 0,
+    currentSliceZ: 0,
     stepThrough: false,
     slicingPlane: "Z"
   });
 
-  // Load STL from user file input
-  const handleFileInput = (e) => {
-    if (e.target.files.length === 0) return;
-    const file = e.target.files[0];
-    const url = URL.createObjectURL(file);
-    setStlFile(url);
-  };
-
-  // Update handlers
   const handleSliceHeightChange = (e) => {
-    setSlicingParams({ ...slicingParams, sliceHeight: parseFloat(e.target.value), stepThrough: false });
+    setSlicingParams({ ...slicingParams, sliceHeight: parseFloat(e.target.value) });
   };
 
   const handlePlaneChange = (e) => {
-    setSlicingParams({ ...slicingParams, slicingPlane: e.target.value, stepThrough: false });
+    setSlicingParams({ ...slicingParams, slicingPlane: e.target.value });
   };
 
   const handleToggleSlices = () => {
@@ -40,16 +30,59 @@ const STLViewer = () => {
   };
 
   const handleStepChange = (e) => {
-    setSlicingParams({ ...slicingParams, currentSlicePos: parseFloat(e.target.value), stepThrough: true });
+    setSlicingParams({ ...slicingParams, currentSliceZ: parseFloat(e.target.value), stepThrough: true });
   };
 
-  // Clear previous slices from scene
-  const clearSlices = (scene) => {
-    scene.children.filter(c => c.name === "sliceLine").forEach(line => scene.remove(line));
+  // Helper to compare points with tolerance
+  const pointsEqual = (p1, p2, eps = 1e-5) => {
+    return p1.distanceToSquared(p2) < eps * eps;
   };
 
-  // Slice geometry at given heights on selected plane
-  const sliceSTL = (geometry, scene, heightStep = 2, currentVal = null, plane = "Z") => {
+  // Chain line segments into connected polylines
+  const buildPolylines = (segments) => {
+    const polylines = [];
+
+    while (segments.length) {
+      let polyline = segments.pop();
+      let changed;
+
+      do {
+        changed = false;
+        for (let i = 0; i < segments.length; i++) {
+          const seg = segments[i];
+
+          if (pointsEqual(polyline[polyline.length - 1], seg[0])) {
+            polyline.push(seg[1]);
+            segments.splice(i, 1);
+            changed = true;
+            break;
+          } else if (pointsEqual(polyline[polyline.length - 1], seg[1])) {
+            polyline.push(seg[0]);
+            segments.splice(i, 1);
+            changed = true;
+            break;
+          } else if (pointsEqual(polyline[0], seg[0])) {
+            polyline.unshift(seg[1]);
+            segments.splice(i, 1);
+            changed = true;
+            break;
+          } else if (pointsEqual(polyline[0], seg[1])) {
+            polyline.unshift(seg[0]);
+            segments.splice(i, 1);
+            changed = true;
+            break;
+          }
+        }
+      } while (changed);
+
+      polylines.push(polyline);
+    }
+
+    return polylines;
+  };
+
+  // Main slicing function
+  const sliceSTL = (geometry, scene, heightStep = 2, currentZ = null, plane = "Z") => {
     const position = geometry.attributes.position;
     const bbox = geometry.boundingBox;
 
@@ -62,12 +95,10 @@ const STLViewer = () => {
       axis = "y"; min = bbox.min.y; max = bbox.max.y;
     }
 
-    const values = currentVal !== null
-      ? [currentVal]
-      : Array.from({ length: Math.floor((max - min) / heightStep) + 1 }, (_, i) => min + i * heightStep);
+    const values = currentZ !== null ? [currentZ] : Array.from({ length: Math.floor((max - min) / heightStep) + 1 }, (_, i) => min + i * heightStep);
 
     values.forEach(value => {
-      const points = [];
+      const segments = [];
 
       for (let i = 0; i < position.count; i += 3) {
         const p1 = new THREE.Vector3().fromBufferAttribute(position, i);
@@ -75,6 +106,9 @@ const STLViewer = () => {
         const p3 = new THREE.Vector3().fromBufferAttribute(position, i + 2);
 
         const triangle = [p1, p2, p3];
+
+        let intersections = [];
+
         for (let j = 0; j < 3; j++) {
           const v1 = triangle[j];
           const v2 = triangle[(j + 1) % 3];
@@ -84,92 +118,94 @@ const STLViewer = () => {
             const x = v1.x + t * (v2.x - v1.x);
             const y = v1.y + t * (v2.y - v1.y);
             const z = v1.z + t * (v2.z - v1.z);
-            points.push(new THREE.Vector3(x, y, z));
+            intersections.push(new THREE.Vector3(x, y, z));
           }
+        }
+
+        if (intersections.length === 2) {
+          segments.push([intersections[0], intersections[1]]);
         }
       }
 
-      if (points.length > 1) {
-        const sliceGeometry = new THREE.BufferGeometry().setFromPoints(points);
+      // Clear existing slice lines first
+      clearSlices(scene);
+
+      // Build connected polylines from segments
+      const polylines = buildPolylines(segments);
+
+      // Add polylines to scene as continuous lines
+      polylines.forEach(polyline => {
+        if (polyline.length < 2) return;
+        const sliceGeometry = new THREE.BufferGeometry().setFromPoints(polyline);
         const sliceMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 });
-        const sliceLine = new THREE.LineSegments(sliceGeometry, sliceMaterial);
+        const sliceLine = new THREE.Line(sliceGeometry, sliceMaterial);
         sliceLine.name = "sliceLine";
         scene.add(sliceLine);
-      }
+      });
     });
   };
 
-  // Project 3D points to 2D coords for export
-  const projectPoint = (v) => {
-    switch (slicingParams.slicingPlane) {
-      case "X": return { x: v.y, y: v.z };
-      case "Y": return { x: v.x, y: v.z };
-      default: return { x: v.x, y: v.y };
-    }
+  const clearSlices = (scene) => {
+    const slices = scene.children.filter(child => child.name === "sliceLine");
+    slices.forEach(line => scene.remove(line));
   };
 
-  // Export DXF
+  // Export connected polylines to DXF
   const exportDXF = () => {
     const scene = sceneState.scene;
     if (!scene) return;
 
-    const lines = scene.children.filter(c => c.name === "sliceLine");
-    if (!lines.length) return alert("No slices to export!");
+    const lines = scene.children.filter(child => child.name === "sliceLine");
+    if (lines.length === 0) return;
 
-    let dxf = "0\nSECTION\n2\nENTITIES\n";
+    let dxfContent = "0\nSECTION\n2\nENTITIES\n";
+
     lines.forEach(line => {
-      const pos = line.geometry.attributes.position;
-      for (let i = 0; i < pos.count; i += 2) {
-        const p1 = new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i));
-        const p2 = new THREE.Vector3(pos.getX(i + 1), pos.getY(i + 1), pos.getZ(i + 1));
-        const proj1 = projectPoint(p1);
-        const proj2 = projectPoint(p2);
-
-        dxf += `0\nLINE\n8\n0\n10\n${proj1.x.toFixed(3)}\n20\n${proj1.y.toFixed(3)}\n30\n0\n11\n${proj2.x.toFixed(3)}\n21\n${proj2.y.toFixed(3)}\n31\n0\n`;
+      const positions = line.geometry.attributes.position;
+      for (let i = 0; i < positions.count - 1; i++) {
+        const x1 = positions.getX(i).toFixed(3);
+        const y1 = positions.getY(i).toFixed(3);
+        const x2 = positions.getX(i + 1).toFixed(3);
+        const y2 = positions.getY(i + 1).toFixed(3);
+        dxfContent +=
+          `0\nLINE\n8\n0\n10\n${x1}\n20\n${y1}\n30\n0\n11\n${x2}\n21\n${y2}\n31\n0\n`;
       }
     });
-    dxf += "0\nENDSEC\n0\nEOF";
 
-    const blob = new Blob([dxf], { type: "application/dxf" });
+    dxfContent += "0\nENDSEC\n0\nEOF";
+
+    const blob = new Blob([dxfContent], { type: "application/dxf" });
     saveAs(blob, "slice.dxf");
   };
 
-  // Export SVG (red stroke 0.05mm, connected)
+  // Export connected polylines to SVG with red stroke 0.05mm
   const exportSVG = () => {
     const scene = sceneState.scene;
     if (!scene) return;
 
-    const lines = scene.children.filter(c => c.name === "sliceLine");
-    if (!lines.length) return alert("No slices to export!");
+    const lines = scene.children.filter(child => child.name === "sliceLine");
+    if (lines.length === 0) return;
 
-    let svgPaths = "";
-    lines.forEach(line => {
+    const svgPaths = lines.map(line => {
       const pos = line.geometry.attributes.position;
-      if (pos.count < 2) return;
-
-      let firstP = new THREE.Vector3(pos.getX(0), pos.getY(0), pos.getZ(0));
-      let proj = projectPoint(firstP);
-      let pathData = `M ${proj.x} ${-proj.y}`;
-
-      for (let i = 1; i < pos.count; i++) {
-        const p = new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i));
-        const projP = projectPoint(p);
-        pathData += ` L ${projP.x} ${-projP.y}`;
+      let pathData = "M ";
+      for (let i = 0; i < pos.count; i++) {
+        const x = pos.getX(i).toFixed(3);
+        const y = -pos.getY(i).toFixed(3); // invert Y for SVG coords
+        pathData += `${x},${y} `;
       }
+      return `<path d="${pathData}" stroke="red" stroke-width="0.05" fill="none"/>`;
+    }).join('\n');
 
-      svgPaths += `<path d="${pathData}" stroke="red" stroke-width="0.05" fill="none"/>`;
-    });
-
-    const svg = `<?xml version="1.0" encoding="UTF-8" standalone="no"?>
-<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="100%" height="100%" viewBox="-100 -100 200 200">
+    const svgContent = `<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1">
 ${svgPaths}
 </svg>`;
 
-    const blob = new Blob([svg], { type: "image/svg+xml" });
-    saveAs(blob, "slice.svg");
+    const svgBlob = new Blob([svgContent], { type: 'image/svg+xml' });
+    saveAs(svgBlob, 'slice.svg');
   };
 
-  // Setup three.js scene
   useEffect(() => {
     const mount = mountRef.current;
 
@@ -206,7 +242,6 @@ ${svgPaths}
     };
   }, []);
 
-  // Load STL and update scene + slices on file or slicing param changes
   useEffect(() => {
     if (!sceneReady || !stlFile) return;
 
@@ -226,41 +261,30 @@ ${svgPaths}
       const scene = sceneState.scene;
       if (!scene) return;
 
-      const existingMesh = scene.getObjectByName("stlMesh");
-      if (existingMesh) scene.remove(existingMesh);
-      clearSlices(scene);
-
+      const existing = scene.getObjectByName("stlMesh");
+      if (existing) scene.remove(existing);
       scene.add(mesh);
 
+      clearSlices(scene);
       if (slicingParams.showSlices) {
-        sliceSTL(
-          geometry,
-          scene,
-          slicingParams.sliceHeight,
-          slicingParams.stepThrough ? slicingParams.currentSlicePos : null,
-          slicingParams.slicingPlane
-        );
+        sliceSTL(geometry, scene, slicingParams.sliceHeight, slicingParams.stepThrough ? slicingParams.currentSliceZ : null, slicingParams.slicingPlane);
       }
     });
   }, [stlFile, sceneReady, slicingParams]);
 
   return (
     <div>
-      <div style={{ padding: 10, background: "#222", color: "#eee", fontFamily: "sans-serif", userSelect: "none" }}>
-        <input type="file" accept=".stl" onChange={handleFileInput} />
-
-        <label style={{ marginLeft: 20 }}>
-          Slice Height (mm):
+      <div style={{ padding: 10 }}>
+        <label>
+          Slice Height:
           <input
             type="number"
             step="0.1"
             min="0.1"
             value={slicingParams.sliceHeight}
             onChange={handleSliceHeightChange}
-            style={{ width: 60, marginLeft: 5 }}
           />
         </label>
-
         <label style={{ marginLeft: 20 }}>
           <input
             type="checkbox"
@@ -269,43 +293,33 @@ ${svgPaths}
           />
           Show Slices
         </label>
-
         <label style={{ marginLeft: 20 }}>
           Plane:
-          <select
-            value={slicingParams.slicingPlane}
-            onChange={handlePlaneChange}
-            style={{ marginLeft: 5 }}
-          >
+          <select value={slicingParams.slicingPlane} onChange={handlePlaneChange}>
             <option value="Z">Z</option>
             <option value="X">X</option>
             <option value="Y">Y</option>
           </select>
         </label>
-
         <label style={{ marginLeft: 20 }}>
           Step Through:
           <input
             type="range"
-            min={geometry?.boundingBox?.min[slicingParams.slicingPlane.toLowerCase()] ?? 0}
-            max={geometry?.boundingBox?.max[slicingParams.slicingPlane.toLowerCase()] ?? 100}
+            min={geometry?.boundingBox?.min[slicingParams.slicingPlane.toLowerCase()] || 0}
+            max={geometry?.boundingBox?.max[slicingParams.slicingPlane.toLowerCase()] || 100}
             step="0.1"
-            value={slicingParams.currentSlicePos}
+            value={slicingParams.currentSliceZ}
             onChange={handleStepChange}
             disabled={!geometry}
-            style={{ verticalAlign: "middle", marginLeft: 5, width: 150 }}
           />
         </label>
-
         <button onClick={exportDXF} style={{ marginLeft: 20 }}>
           Export DXF
         </button>
-
         <button onClick={exportSVG} style={{ marginLeft: 10 }}>
           Export SVG
         </button>
       </div>
-
       <div ref={mountRef} style={{ width: "100%", height: "90vh" }} />
     </div>
   );
