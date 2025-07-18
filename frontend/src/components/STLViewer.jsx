@@ -344,6 +344,10 @@ const STLViewer = ({ stlFile }) => {
         path.push(intP2);
         subjectPaths.push(path);
       });
+      
+      // --- CRITICAL FIX: Add the subjectPaths to the clipper object ---
+      // This was the missing line causing ClipperLib.Execute to fail.
+      clipper.AddPaths(subjectPaths, ClipperLib.PolyType.ptSubject, true); 
 
       const solutionPolyTree = new ClipperLib.PolyTree();
       let clipperSuccess = false;
@@ -449,13 +453,10 @@ const STLViewer = ({ stlFile }) => {
 
         pathD += i === 0 ? `M ${px.toFixed(3)} ${(-py).toFixed(3)}` : ` L ${px.toFixed(3)} ${(-py).toFixed(3)}`;
       }
-      // Only close path if it's a LineLoop (Clipper output)
-      // LineSegments (fallback) don't form closed paths naturally
       if (line instanceof THREE.LineLoop) {
         pathD += " Z";
       }
 
-      // Use line's material color for SVG stroke
       const strokeColor = `#${line.material.color.getHexString()}`;
       svgPaths += `<path d="${pathD}" stroke="${strokeColor}" stroke-width="0.05" fill="none"/>`;
     });
@@ -479,7 +480,6 @@ ${svgPaths}
     let dxfContent = "0\nSECTION\n2\nENTITIES\n";
     lines.forEach((line) => {
       const pos = line.geometry.attributes.position;
-      // For LineSegments, iterate pairs; for LineLoop, iterate all and connect last to first
       const numSegments = line instanceof THREE.LineLoop ? pos.count : pos.count / 2;
 
       for (let i = 0; i < numSegments; i++) {
@@ -490,12 +490,12 @@ ${svgPaths}
         let nextIndex;
         if (line instanceof THREE.LineLoop) {
           nextIndex = (i + 1) % pos.count;
-        } else { // LineSegments
-          nextIndex = i * 2 + 1; // For raw segments, points are [p1, p2, p3, p4...]
-          if (i % 2 === 0) { // If it's the start of a segment pair
+        } else {
+          nextIndex = i * 2 + 1;
+          if (i % 2 === 0) {
             nextIndex = i + 1;
-          } else { // If it's the end of a segment pair
-            continue; // Skip, as we handle pairs
+          } else {
+            continue;
           }
         }
         
