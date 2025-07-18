@@ -5,7 +5,7 @@ import * as THREE from 'three';
 
 const CL_SCALE = 10000000; // Scale factor for ClipperLib (10 million)
 const EPSILON = 1e-5; // Epsilon for filtering very small segments (e.g., zero length)
-const SNAP_TOLERANCE = 0.1; // Increased tolerance for snapping points, e.g., 0.1mm
+const SNAP_TOLERANCE = 0.5; // Significantly increased tolerance for snapping points, e.g., 0.5mm
 
 /**
  * getSliceSegments (Worker-side)
@@ -132,10 +132,11 @@ function snapPointsToGrid(rawSegments, plane) {
 
         // Snap to grid using SNAP_TOLERANCE
         // This rounds coordinates to the nearest multiple of SNAP_TOLERANCE
-        const snappedX1 = Math.round(x1_2D / SNAP_TOLERANCE) * SNAP_TOLERANCE;
-        const snappedY1 = Math.round(y1_2D / SNAP_TOLERANCE) * SNAP_TOLERANCE;
-        const snappedX2 = Math.round(x2_2D / SNAP_TOLERANCE) * SNAP_TOLERANCE;
-        const snappedY2 = Math.round(y2_2D / SNAP_TOLERANCE) * SNAP_TOLERANCE;
+        const snapFactor = 1 / SNAP_TOLERANCE; // e.g., 1 / 0.5 = 2
+        const snappedX1 = Math.round(x1_2D * snapFactor) / snapFactor;
+        const snappedY1 = Math.round(y1_2D * snapFactor) / snapFactor;
+        const snappedX2 = Math.round(x2_2D * snapFactor) / snapFactor;
+        const snappedY2 = Math.round(y2_2D * snapFactor) / snapFactor;
 
         // Create unique keys for the snapped points (using higher precision for keying)
         // Using a high precision for toFixed to ensure distinct snapped points get distinct keys
@@ -167,6 +168,104 @@ function snapPointsToGrid(rawSegments, plane) {
     });
 
     return snappedSegments;
+}
+
+/**
+ * traceContours (Worker-side)
+ * Traces closed contours from a set of disconnected line segments.
+ * This is a crucial step to provide ClipperLib with proper polygon inputs.
+ * @param {Array<Array<ClipperLib.IntPoint>>} segments An array of 2-point segments (ClipperLib.IntPoint arrays).
+ * @returns {ClipperLib.Paths} An array of closed ClipperLib.Path objects.
+ */
+function traceContours(segments) {
+    const paths = new ClipperLib.Paths();
+    // Use a map to store segments by their start point, allowing quick lookup for connections
+    // Key: stringified point {X,Y}, Value: Array of {segmentIndex, endpointIndex (0 for start, 1 for end)}
+    const adjacencyMap = new Map();
+    const usedSegments = new Set();
+
+    segments.forEach((segment, index) => {
+        const p1 = segment[0];
+        const p2 = segment[1];
+
+        const key1 = `${p1.X},${p1.Y}`;
+        const key2 = `${p2.X},${p2.Y}`;
+
+        if (!adjacencyMap.has(key1)) adjacencyMap.set(key1, []);
+        if (!adjacencyMap.has(key2)) adjacencyMap.set(key2, []);
+
+        adjacencyMap.get(key1).push({ segmentIndex: index, otherPoint: p2 });
+        adjacencyMap.get(key2).push({ segmentIndex: index, otherPoint: p1 });
+    });
+
+    // Iterate through all segments to find starting points for contours
+    for (let i = 0; i < segments.length; i++) {
+        if (usedSegments.has(i)) continue; // Skip if this segment is already part of a contour
+
+        const currentPath = new ClipperLib.Path();
+        let currentSegmentIndex = i;
+        let currentPoint = segments[i][0]; // Start with the first point of the segment
+        const startPoint = currentPoint;
+        const startPointKey = `${startPoint.X},${startPoint.Y}`;
+
+        let loopDetected = false;
+        let iterationCount = 0;
+        const MAX_ITERATIONS = segments.length * 2 + 5; // Safety break
+
+        while (!loopDetected && iterationCount < MAX_ITERATIONS) {
+            iterationCount++;
+
+            // Add the current point to the path if it's not the first point being added for this segment
+            // or if it's the very first point of the contour.
+            if (currentPath.length === 0 || (currentPath[currentPath.length - 1].X !== currentPoint.X || currentPath[currentPath.length - 1].Y !== currentPoint.Y)) {
+                currentPath.push(currentPoint);
+            }
+            
+            usedSegments.add(currentSegmentIndex);
+
+            const segmentsFromCurrentPoint = adjacencyMap.get(`${currentPoint.X},${currentPoint.Y}`);
+            if (!segmentsFromCurrentPoint || segmentsFromCurrentPoint.length === 0) {
+                // Dead end, cannot form a closed loop from this chain
+                break;
+            }
+
+            let foundNext = false;
+            for (const conn of segmentsFromCurrentPoint) {
+                if (!usedSegments.has(conn.segmentIndex)) {
+                    // This is the next segment in the chain
+                    currentSegmentIndex = conn.segmentIndex;
+                    currentPoint = conn.otherPoint; // Move to the other endpoint of the found segment
+                    foundNext = true;
+                    break;
+                }
+            }
+
+            if (!foundNext) {
+                // No unvisited segments found from this point.
+                // Check if we can close the loop by connecting back to the start point.
+                if (currentPath.length > 1 && `${currentPoint.X},${currentPoint.Y}` === startPointKey) {
+                    loopDetected = true;
+                }
+                break; // No more connections or loop not closed
+            }
+            
+            // If we found a next segment, check if the next point is the start point to close the loop
+            if (foundNext && `${currentPoint.X},${currentPoint.Y}` === startPointKey && currentPath.length > 1) {
+                loopDetected = true;
+                break;
+            }
+        }
+
+        if (loopDetected && currentPath.length > 2) { // Ensure it's a valid polygon (at least 3 unique points)
+            paths.push(currentPath);
+        } else if (currentPath.length > 1) {
+            // This means it was an open path that couldn't be closed.
+            // For polygon operations, we generally discard open paths.
+            // If we needed to render open paths, we'd handle them differently.
+        }
+    }
+
+    return paths;
 }
 
 
@@ -207,18 +306,35 @@ function processSlicesWithClipper(slicesData, plane) {
             return;
         }
 
+        // Step 2: Trace closed contours from the snapped segments
+        const tracedClosedPaths = traceContours(snappedIntSegments);
+
         const clipper = new ClipperLib.Clipper();
         const subjectPaths = new ClipperLib.Paths();
 
-        snappedIntSegments.forEach(segment => {
-            const path = new ClipperLib.Path();
-            path.push(segment[0]); // intP1
-            path.push(segment[1]); // intP2
+        // Add the traced closed paths to ClipperLib.
+        // Now, we are explicitly telling ClipperLib that these are CLOSED polygons (true).
+        tracedClosedPaths.forEach(path => {
             subjectPaths.push(path);
         });
 
-        // CRITICAL FIX: Add paths as OPEN paths (false) so Clipper can connect them
-        clipper.AddPaths(subjectPaths, ClipperLib.PolyType.ptSubject, false); 
+        // Only proceed with Clipper.Execute if we have valid traced paths
+        if (subjectPaths.length === 0) {
+             console.warn(`Worker: No closed contours traced for slice at value: ${slicePlaneValue}. Falling back to raw segments.`);
+             rawSegments.forEach(segment => {
+                 finalContours.push(...segment[0], ...segment[1]);
+             });
+             processedSlices.push({
+                 value: slicePlaneValue,
+                 contours: finalContours,
+                 isFallback: true,
+                 plane: plane
+             });
+             return;
+        }
+
+
+        clipper.AddPaths(subjectPaths, ClipperLib.PolyType.ptSubject, true); // Now 'true' because we traced them as closed
 
         const solutionPolyTree = new ClipperLib.PolyTree();
         let clipperSuccess = false;
@@ -226,6 +342,7 @@ function processSlicesWithClipper(slicesData, plane) {
         let isFallback = false;
 
         try {
+            // Use ctUnion to combine any overlapping or adjacent polygons
             clipperSuccess = clipper.Execute(
                 ClipperLib.ClipType.ctUnion,
                 solutionPolyTree,
@@ -234,7 +351,7 @@ function processSlicesWithClipper(slicesData, plane) {
             );
 
             if (!clipperSuccess) {
-                console.warn(`Worker: ClipperLib Execute failed for slice at value: ${slicePlaneValue}. Falling back to raw segments. Snapped segments:`, JSON.stringify(snappedIntSegments));
+                console.warn(`Worker: ClipperLib Execute failed for slice at value: ${slicePlaneValue} after tracing. Falling back to raw segments. Traced paths count: ${tracedClosedPaths.length}`);
                 isFallback = true;
                 rawSegments.forEach(segment => {
                     finalContours.push(...segment[0], ...segment[1]);
@@ -264,7 +381,7 @@ function processSlicesWithClipper(slicesData, plane) {
                 });
             }
         } catch (e) {
-            console.error(`Worker: ClipperLib threw an error for slice at value: ${slicePlaneValue}. Error:`, e, 'Falling back to raw segments. Snapped segments:', JSON.stringify(snappedIntSegments));
+            console.error(`Worker: ClipperLib threw an error for slice at value: ${slicePlaneValue} after tracing. Error:`, e, 'Falling back to raw segments. Traced paths count:', tracedClosedPaths.length);
             isFallback = true;
             rawSegments.forEach(segment => {
                 finalContours.push(...segment[0], ...segment[1]);
