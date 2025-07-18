@@ -30,32 +30,21 @@ function getSliceSegments(positionArray, bboxData, heightStep, currentSliceVal, 
 
     let axis;
     let min, max;
+    
+    // Determine the axis and min/max bounds based on the slicing plane
     if (plane === "Z") {
         axis = "z";
-        min = bboxData.min[0]; // Access as array element
-        max = bboxData.max[0]; // Access as array element
-    } else if (plane === "X") {
-        axis = "x";
-        min = bboxData.min[0]; // Access as array element
-        max = bboxData.max[0]; // Access as array element
-    } else { // Y plane
-        axis = "y";
-        min = bboxData.min[1]; // Access as array element
-        max = bboxData.max[1]; // Access as array element
-    }
-    
-    // Adjust min/max based on the selected plane for slicing
-    if (plane === "Z") {
         min = bboxData.min[2]; // Z-axis
         max = bboxData.max[2]; // Z-axis
     } else if (plane === "X") {
+        axis = "x";
         min = bboxData.min[0]; // X-axis
         max = bboxData.max[0]; // X-axis
     } else { // Y plane
+        axis = "y";
         min = bboxData.min[1]; // Y-axis
         max = bboxData.max[1]; // Y-axis
     }
-
 
     const valuesToSlice =
         currentSliceVal !== null
@@ -286,10 +275,10 @@ function traceContours(segments) {
 
 /**
  * processSlicesWithClipper (Worker-side)
- * Processes raw segments using js-clipper and returns processed contours.
+ * Processes raw segments and returns them as contours, bypassing ClipperLib for contour generation.
  * @param {Array<{ value: number, segments: Array<Array<number[]>> }>} slicesData Data for each slice plane.
  * @param {'X' | 'Y' | 'Z'} plane The slicing plane, used for projection.
- * @returns {Array<{ value: number, contours: Array<number[]>, isFallback: boolean }>} Processed contours.
+ * @returns {Array<{ value: number, contours: Array<number[]>, isFallback: boolean }>} Processed contours (raw segments).
  */
 function processSlicesWithClipper(slicesData, plane) {
     const processedSlices = [];
@@ -297,9 +286,8 @@ function processSlicesWithClipper(slicesData, plane) {
     slicesData.forEach(sliceData => {
         const { value: slicePlaneValue, segments: rawSegments } = sliceData;
 
-        // Declare finalContours and isFallback at the top of the function
         let finalContours = [];
-        let isFallback = false;
+        const isFallback = true; // Always true as we are explicitly using raw segments
 
         if (rawSegments.length === 0) {
             processedSlices.push({
@@ -311,104 +299,17 @@ function processSlicesWithClipper(slicesData, plane) {
             return;
         }
 
-        // Step 1: Snap points to a grid to merge nearly coincident vertices
-        const snappedIntSegments = snapPointsToGrid(rawSegments, plane);
-
-        if (snappedIntSegments.length === 0) {
-            // After snapping, if no valid segments remain, skip this slice or treat as empty
-            processedSlices.push({
-                value: slicePlaneValue,
-                contours: [],
-                isFallback: false,
-                plane: plane
-            });
-            return;
-        }
-
-        // Step 2: Trace closed contours from the snapped segments
-        const tracedClosedPaths = traceContours(snappedIntSegments);
-
-        const clipper = new ClipperLib.Clipper();
-        const subjectPaths = new ClipperLib.Paths();
-
-        // Add the traced closed paths to ClipperLib.
-        // Now, we are explicitly telling ClipperLib that these are CLOSED polygons (true).
-        tracedClosedPaths.forEach(path => {
-            subjectPaths.push(path);
+        // Directly use raw segments for the contours
+        rawSegments.forEach(segment => {
+            // Flatten the 3D points into a single array for BufferGeometry
+            finalContours.push(...segment[0], ...segment[1]);
         });
-
-        // Only proceed with Clipper.Execute if we have valid traced paths
-        if (subjectPaths.length === 0) {
-             console.warn(`Worker: No closed contours traced for slice at value: ${slicePlaneValue}. Falling back to raw segments.`);
-             rawSegments.forEach(segment => {
-                 finalContours.push(...segment[0], ...segment[1]);
-             });
-             processedSlices.push({
-                 value: slicePlaneValue,
-                 contours: finalContours,
-                 isFallback: true,
-                 plane: plane
-             });
-             return;
-        }
-
-
-        clipper.AddPaths(subjectPaths, ClipperLib.PolyType.ptSubject, true); // Now 'true' because we traced them as closed
-
-        const solutionPolyTree = new ClipperLib.PolyTree();
-        
-        try {
-            // Use ctUnion to combine any overlapping or adjacent polygons
-            const clipperSuccess = clipper.Execute( // Declare clipperSuccess with const
-                ClipperLib.ClipType.ctUnion,
-                solutionPolyTree,
-                ClipperLib.PolyFillType.pftNonZero,
-                ClipperLib.PolyFillType.pftNonZero
-            );
-
-            if (!clipperSuccess) {
-                console.warn(`Worker: ClipperLib Execute failed for slice at value: ${slicePlaneValue} after tracing. Falling back to raw segments. Traced paths count: ${tracedClosedPaths.length}`);
-                isFallback = true;
-                rawSegments.forEach(segment => {
-                    finalContours.push(...segment[0], ...segment[1]);
-                });
-            } else {
-                const solutionPaths = ClipperLib.Clipper.PolyTreeToPaths(solutionPolyTree);
-                solutionPaths.forEach(path => {
-                    if (path.length < 2) return; // Need at least 2 points for a line/contour
-                    const threeJsPoints = [];
-                    path.forEach(intPoint => {
-                        const x = intPoint.X / CL_SCALE;
-                        const y = intPoint.Y / CL_SCALE;
-
-                        let threeDPoint;
-                        if (plane === "Z") {
-                            threeDPoint = [x, y, slicePlaneValue];
-                        } else if (plane === "X") {
-                            threeDPoint = [slicePlaneValue, x, y];
-                        } else {
-                            threeDPoint = [x, slicePlaneValue, y];
-                        }
-                        threeJsPoints.push(...threeDPoint); // Flatten for BufferGeometry
-                    });
-                    if (threeJsPoints.length > 0) {
-                        finalContours.push(...threeJsPoints); // Add to final contours
-                    }
-                });
-            }
-        } catch (e) {
-            console.error(`Worker: ClipperLib threw an error for slice at value: ${slicePlaneValue} after tracing. Error:`, e, 'Falling back to raw segments. Traced paths count:', tracedClosedPaths.length);
-            isFallback = true;
-            rawSegments.forEach(segment => {
-                finalContours.push(...segment[0], ...segment[1]);
-            });
-        }
 
         if (finalContours.length > 0) {
             processedSlices.push({
                 value: slicePlaneValue,
                 contours: finalContours, // Flattened array of coordinates
-                isFallback: isFallback,
+                isFallback: isFallback, // Mark as fallback (raw segments)
                 plane: plane
             });
         }
@@ -427,6 +328,7 @@ self.onmessage = function(event) {
 
         const slicesData = getSliceSegments(positionArray, bboxData, sliceHeight, currentSlice, slicingPlane);
 
+        // Process slices, now configured to return raw segments directly
         const processedContours = processSlicesWithClipper(slicesData, slicingPlane);
 
         self.postMessage({ type: 'slicingComplete', payload: processedContours });
