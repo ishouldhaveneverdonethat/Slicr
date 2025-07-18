@@ -217,7 +217,8 @@ function processSlicesWithClipper(slicesData, plane) {
             subjectPaths.push(path);
         });
 
-        clipper.AddPaths(subjectPaths, ClipperLib.PolyType.ptSubject, true);
+        // CRITICAL FIX: Add paths as OPEN paths (false) so Clipper can connect them
+        clipper.AddPaths(subjectPaths, ClipperLib.PolyType.ptSubject, false); 
 
         const solutionPolyTree = new ClipperLib.PolyTree();
         let clipperSuccess = false;
