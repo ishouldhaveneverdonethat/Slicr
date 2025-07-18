@@ -14,6 +14,9 @@ const STLViewer = ({ stlFile }) => {
   const mountRef = useRef(null);
   const [sceneState, setSceneState] = useState({ scene: null, renderer: null, camera: null, controls: null });
   const [geometry, setGeometry] = useState(null);
+  const [originalDimensions, setOriginalDimensions] = useState({ x: 0, y: 0, z: 0 });
+  const [targetDimensions, setTargetDimensions] = useState({ width: 0, height: 0, depth: 0 });
+  const [currentScale, setCurrentScale] = useState({ x: 1, y: 1, z: 1 }); // Actual scale applied
 
   // --- 3. Slicing Logic State ---
   const [slicingParams, setSlicingParams] = useState({
@@ -23,6 +26,9 @@ const STLViewer = ({ stlFile }) => {
     currentSliceValue: 0, // Actual coordinate value
     singleSliceMode: false,
     slicingPlane: "Z",
+    scaleX: 1, // Will be updated dynamically based on targetDimensions
+    scaleY: 1, // Will be updated dynamically based on targetDimensions
+    scaleZ: 1, // Will be updated dynamically based on targetDimensions
   });
 
   // --- New state for controlling model outline visibility ---
@@ -142,7 +148,7 @@ const STLViewer = ({ stlFile }) => {
   const handleStepChange = (e) => {
     const newLayerIndex = parseInt(e.target.value, 10);
     // Calculate the actual slice coordinate based on the layer index
-    const calculatedSliceValue = minRangeValue + newLayerIndex * slicingParams.sliceHeight;
+    const calculatedSliceValue = getScaledMinRangeValue() + newLayerIndex * slicingParams.sliceHeight;
 
     setSlicingParams((p) => ({
       ...p,
@@ -175,6 +181,15 @@ const STLViewer = ({ stlFile }) => {
       ...prev,
       singleSliceMode: false, // Disable manual single slice
       showSlices: true, // Ensure slices are visible
+    }));
+  };
+
+  // New: Handlers for target dimension changes
+  const handleTargetDimensionChange = (dimension) => (e) => {
+    const value = parseFloat(e.target.value);
+    setTargetDimensions(prev => ({
+      ...prev,
+      [dimension]: isNaN(value) ? 0 : value, // Default to 0 if invalid input
     }));
   };
 
@@ -242,6 +257,12 @@ const STLViewer = ({ stlFile }) => {
       loadedGeometry.computeBoundingBox();
       setGeometry(loadedGeometry);
 
+      const initialSize = new THREE.Vector3();
+      loadedGeometry.boundingBox.getSize(initialSize);
+      setOriginalDimensions({ x: initialSize.x, y: initialSize.y, z: initialSize.z });
+      // Initialize target dimensions to original dimensions when a new model is loaded
+      setTargetDimensions({ width: initialSize.x, height: initialSize.y, depth: initialSize.z });
+
       // Changed material to be fully opaque
       const material = new THREE.MeshPhongMaterial({
         color: 0x00aaff,
@@ -254,7 +275,8 @@ const STLViewer = ({ stlFile }) => {
       loadedGeometry.boundingBox.getCenter(center);
       mesh.position.sub(center);
       mesh.name = "stlMesh";
-
+      
+      // Do NOT apply scale here initially, it will be done in a separate useEffect
       const scene = sceneState.scene;
       const existingMesh = scene.getObjectByName("stlMesh");
       if (existingMesh) {
@@ -289,28 +311,7 @@ const STLViewer = ({ stlFile }) => {
       // --- End Model Outline Logic ---
 
 
-      if (sceneState.camera && sceneState.controls) {
-        const size = new THREE.Vector3();
-        loadedGeometry.boundingBox.getSize(size);
-        const maxDim = Math.max(size.x, size.y, size.z);
-        const fov = sceneState.camera.fov * (Math.PI / 180);
-        let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
-        cameraZ *= 1.5;
-        sceneState.camera.position.set(center.x, center.y, center.z + cameraZ);
-        sceneState.camera.lookAt(center);
-        sceneState.controls.target.copy(center);
-        sceneState.controls.update();
-      }
-
-      // After loading new geometry, update currentSliceValue based on currentLayerIndex
-      // and trigger slicing.
-      const initialMinRangeValue = loadedGeometry.boundingBox.min[slicingParams.slicingPlane.toLowerCase()];
-      const initialCalculatedSliceValue = initialMinRangeValue + slicingParams.currentLayerIndex * slicingParams.sliceHeight;
-      setSlicingParams(prev => ({
-        ...prev,
-        currentSliceValue: initialCalculatedSliceValue,
-      }));
-
+      // Camera and controls will be updated by the scaling useEffect
     },
     undefined,
     (error) => {
@@ -318,7 +319,68 @@ const STLViewer = ({ stlFile }) => {
       // Using console.log instead of alert() as per instructions
       console.log("Error loading STL file. Please check the file and try again.");
     });
-  }, [stlFile, sceneState.scene, sceneState.camera, sceneState.controls, showModelOutline]); // Add showModelOutline to dependencies
+  }, [stlFile, sceneState.scene, showModelOutline]); // Removed camera/controls from deps here, handled by scaling effect
+
+
+  // --- Effect to handle model scaling and camera adjustment ---
+  useEffect(() => {
+    if (!geometry || !sceneState.scene || originalDimensions.x === 0 || originalDimensions.y === 0 || originalDimensions.z === 0) {
+      // If original dimensions are zero, or geometry/scene not ready, cannot calculate scale
+      return;
+    }
+
+    const mesh = sceneState.scene.getObjectByName("stlMesh");
+    if (!mesh) return;
+
+    let newScaleX = 1, newScaleY = 1, newScaleZ = 1;
+
+    if (targetDimensions.width > 0) {
+      newScaleX = targetDimensions.width / originalDimensions.x;
+    }
+    if (targetDimensions.height > 0) {
+      newScaleY = targetDimensions.height / originalDimensions.y;
+    }
+    if (targetDimensions.depth > 0) {
+      newScaleZ = targetDimensions.depth / originalDimensions.z;
+    }
+
+    // Apply scale to the mesh
+    mesh.scale.set(newScaleX, newScaleY, newScaleZ);
+    setCurrentScale({ x: newScaleX, y: newScaleY, z: newScaleZ }); // Store actual applied scale
+
+    // Update camera and controls based on new scale
+    if (sceneState.camera && sceneState.controls) {
+      const scaledSize = new THREE.Vector3(
+        originalDimensions.x * newScaleX,
+        originalDimensions.y * newScaleY,
+        originalDimensions.z * newScaleZ
+      );
+      const scaledCenter = new THREE.Vector3();
+      geometry.boundingBox.getCenter(scaledCenter); // Get original center
+      scaledCenter.multiply(new THREE.Vector3(newScaleX, newScaleY, newScaleZ)); // Scale the center
+
+      const maxDim = Math.max(scaledSize.x, scaledSize.y, scaledSize.z);
+      const fov = sceneState.camera.fov * (Math.PI / 180);
+      let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
+      cameraZ *= 1.5; // Add some padding
+
+      sceneState.camera.position.set(scaledCenter.x, scaledCenter.y, scaledCenter.z + cameraZ);
+      sceneState.camera.lookAt(scaledCenter);
+      sceneState.controls.target.copy(scaledCenter);
+      sceneState.controls.update();
+    }
+
+    // Update slicingParams with the new scale factors
+    setSlicingParams(prev => ({
+      ...prev,
+      scaleX: newScaleX,
+      scaleY: newScaleY,
+      scaleZ: newScaleZ,
+      currentLayerIndex: 0, // Reset layer index on scale change
+    }));
+    setShowMiddleSlice(false); // Disable middle slice on scale change
+
+  }, [targetDimensions, originalDimensions, geometry, sceneState.scene, sceneState.camera, sceneState.controls]);
 
 
   // --- Effect to update model outline visibility when showModelOutline changes ---
@@ -341,9 +403,9 @@ const STLViewer = ({ stlFile }) => {
       let showSlicesForWorker = debouncedSlicingParams.showSlices;
 
       if (showMiddleSlice && geometry.boundingBox) {
-        // Calculate middle slice value
-        const bboxMin = geometry.boundingBox.min[debouncedSlicingParams.slicingPlane.toLowerCase()];
-        const bboxMax = geometry.boundingBox.max[debouncedSlicingParams.slicingPlane.toLowerCase()];
+        // Calculate middle slice value based on scaled bounding box
+        const bboxMin = getScaledMinRangeValue(geometry, debouncedSlicingParams.slicingPlane, currentScale.x, currentScale.y, currentScale.z);
+        const bboxMax = getScaledMaxRangeValue(geometry, debouncedSlicingParams.slicingPlane, currentScale.x, currentScale.y, currentScale.z);
         sliceValueToRender = (bboxMin + bboxMax) / 2;
         showSlicesForWorker = true; // Ensure slices are shown if middle slice is active
       } else if (debouncedSlicingParams.singleSliceMode) {
@@ -353,8 +415,8 @@ const STLViewer = ({ stlFile }) => {
       if (showSlicesForWorker) {
         const positionArrayCopy = new Float32Array(geometry.attributes.position.array);
         const bboxData = {
-          min: geometry.boundingBox.min.toArray(),
-          max: geometry.boundingBox.max.toArray(),
+          min: geometry.boundingBox.min.toArray(), // Original unscaled bbox data
+          max: geometry.boundingBox.max.toArray(), // Original unscaled bbox data
         };
 
         workerInstanceRef.current.postMessage({
@@ -365,11 +427,14 @@ const STLViewer = ({ stlFile }) => {
             sliceHeight: debouncedSlicingParams.sliceHeight,
             currentSlice: sliceValueToRender, // Pass the calculated or selected slice value
             slicingPlane: debouncedSlicingParams.slicingPlane,
+            scaleX: currentScale.x, // Pass current actual scale factors to worker
+            scaleY: currentScale.y,
+            scaleZ: currentScale.z,
           }
         });
       }
     }
-  }, [debouncedSlicingParams, geometry, sceneState.scene, showMiddleSlice]); // Add showMiddleSlice to dependencies
+  }, [debouncedSlicingParams, geometry, sceneState.scene, showMiddleSlice, currentScale]); // Add currentScale to dependencies
 
 
   // --- 6. Utility Functions ---
@@ -381,6 +446,27 @@ const STLViewer = ({ stlFile }) => {
       if (line.material) line.material.dispose();
     });
   };
+
+  // Helper to get scaled min range value
+  const getScaledMinRangeValue = useCallback((geom = geometry, plane = slicingParams.slicingPlane, scaleX = currentScale.x, scaleY = currentScale.y, scaleZ = currentScale.z) => {
+    if (!geom || !geom.boundingBox) return 0;
+    const minVal = geom.boundingBox.min[plane.toLowerCase()];
+    if (plane === 'X') return minVal * scaleX;
+    if (plane === 'Y') return minVal * scaleY;
+    if (plane === 'Z') return minVal * scaleZ;
+    return minVal;
+  }, [geometry, slicingParams.slicingPlane, currentScale]);
+
+  // Helper to get scaled max range value
+  const getScaledMaxRangeValue = useCallback((geom = geometry, plane = slicingParams.slicingPlane, scaleX = currentScale.x, scaleY = currentScale.y, scaleZ = currentScale.z) => {
+    if (!geom || !geom.boundingBox) return 100;
+    const maxVal = geom.boundingBox.max[plane.toLowerCase()];
+    if (plane === 'X') return maxVal * scaleX;
+    if (plane === 'Y') return maxVal * scaleY;
+    if (plane === 'Z') return maxVal * scaleZ;
+    return maxVal;
+  }, [geometry, slicingParams.slicingPlane, currentScale]);
+
 
   // --- 5. Export Functions ---
   const exportSVG = () => {
@@ -572,16 +658,11 @@ ${svgPaths}
     saveAs(blob, "slice.dxf");
   };
 
-  const minRangeValue = geometry && geometry.boundingBox
-    ? geometry.boundingBox.min[slicingParams.slicingPlane.toLowerCase()]
-    : 0;
-
-  const maxRangeValue = geometry && geometry.boundingBox
-    ? geometry.boundingBox.max[slicingParams.slicingPlane.toLowerCase()]
-    : 100;
+  const minRangeValue = getScaledMinRangeValue();
+  const maxRangeValue = getScaledMaxRangeValue();
 
   let totalLayers = 0;
-  let currentLayerIndex = 0;
+  let currentLayerIndex = slicingParams.currentLayerIndex; // Use from state
   let modelDimensions = { x: 0, y: 0, z: 0 };
 
   if (geometry && geometry.boundingBox && slicingParams.sliceHeight > 0) {
@@ -591,12 +672,10 @@ ${svgPaths}
     // Clamp currentLayerIndex to valid range
     currentLayerIndex = Math.max(0, Math.min(totalLayers > 0 ? totalLayers - 1 : 0, slicingParams.currentLayerIndex));
 
-    const size = new THREE.Vector3();
-    geometry.boundingBox.getSize(size);
     modelDimensions = {
-      x: size.x.toFixed(2),
-      y: size.y.toFixed(2),
-      z: size.z.toFixed(2),
+      x: (originalDimensions.x * currentScale.x).toFixed(2),
+      y: (originalDimensions.y * currentScale.y).toFixed(2),
+      z: (originalDimensions.z * currentScale.z).toFixed(2),
     };
   }
 
@@ -679,6 +758,42 @@ ${svgPaths}
           />
           <span style={{ marginLeft: 5 }}>{slicingParams.currentSliceValue.toFixed(2)}</span> {/* Display actual coordinate */}
         </label>
+        
+        {/* New Target Dimension Controls */}
+        <label style={{ marginLeft: 20 }}>
+          Target Width (mm):
+          <input
+            type="number"
+            step="0.1"
+            min="0"
+            value={targetDimensions.width.toFixed(2)}
+            onChange={handleTargetDimensionChange('width')}
+            style={{ marginLeft: 5, width: 80, padding: 3 }}
+          />
+        </label>
+        <label style={{ marginLeft: 10 }}>
+          Target Height (mm):
+          <input
+            type="number"
+            step="0.1"
+            min="0"
+            value={targetDimensions.height.toFixed(2)}
+            onChange={handleTargetDimensionChange('height')}
+            style={{ marginLeft: 5, width: 80, padding: 3 }}
+          />
+        </label>
+        <label style={{ marginLeft: 10 }}>
+          Target Depth (mm):
+          <input
+            type="number"
+            step="0.1"
+            min="0"
+            value={targetDimensions.depth.toFixed(2)}
+            onChange={handleTargetDimensionChange('depth')}
+            style={{ marginLeft: 5, width: 80, padding: 3 }}
+          />
+        </label>
+
 
         {geometry && (
           <>
