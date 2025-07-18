@@ -5,16 +5,14 @@ import { OrbitControls } from "three-stdlib";
 import { saveAs } from "file-saver";
 
 // Correct way to import a Web Worker in modern bundlers (like Create React App v5+)
-// This creates a URL for the worker script which can then be instantiated.
 const SlicerWorker = new Worker(new URL('../workers/slicerWorker.js', import.meta.url));
 
 
 const STLViewer = ({ stlFile }) => {
-  // --- 1. Model and Geometry State ---
-  const mountRef = useRef(null); // Ref for the main viewer
-  const miniViewerMountRef = useRef(null); // Ref for the mini-viewer
+  // --- Refs for Three.js objects to maintain single instances ---
+  const mountRef = useRef(null); // Ref for the main viewer DOM element
+  const miniViewerMountRef = useRef(null); // Ref for the mini-viewer DOM element
   
-  // Using refs for Three.js objects to prevent re-initialization on every render
   const sceneRef = useRef(null);
   const rendererRef = useRef(null);
   const cameraRef = useRef(null);
@@ -24,65 +22,50 @@ const STLViewer = ({ stlFile }) => {
   const miniRendererRef = useRef(null);
   const miniCameraRef = useRef(null);
 
+  // --- React State for UI and Slicing Logic ---
   const [geometry, setGeometry] = useState(null);
   const [originalDimensions, setOriginalDimensions] = useState({ x: 0, y: 0, z: 0 });
   const [targetDimensions, setTargetDimensions] = useState({ width: 0, height: 0, depth: 0 });
   const [currentScale, setCurrentScale] = useState({ x: 1, y: 1, z: 1 }); // Actual scale applied
 
-  // --- 3. Slicing Logic State ---
   const [slicingParams, setSlicingParams] = useState({
     sliceHeight: 2,
     showSlices: true,
-    currentLayerIndex: 0, // Changed to layer index
-    currentSliceValue: 0, // Actual coordinate value
+    currentLayerIndex: 0,
+    currentSliceValue: 0,
     singleSliceMode: false,
     slicingPlane: "Z",
-    // scaleX, scaleY, scaleZ are now derived from currentScale in the useEffect
   });
 
-  // --- New state for controlling model outline visibility ---
-  const [showModelOutline, setShowModelOutline] = useState(true); // Default to true
-  // --- New state for showing middle slice ---
-  const [showMiddleSlice, setShowMiddleSlice] = useState(false); // Default to false
-  // --- New state for showing mini-viewer ---
-  const [showMiniViewer, setShowMiniViewer] = useState(false); // Default to false
+  const [showModelOutline, setShowModelOutline] = useState(true);
+  const [showMiddleSlice, setShowMiddleSlice] = useState(false);
+  const [showMiniViewer, setShowMiniViewer] = useState(false);
 
-  // --- Debounce state for slicing ---
   const [debouncedSlicingParams, setDebouncedSlicingParams] = useState(slicingParams);
-  // State to hold the worker instance (now directly the instantiated worker)
-  const workerInstanceRef = useRef(null); // Renamed to avoid confusion with the Worker constructor
+  const workerInstanceRef = useRef(null);
 
-  // Initialize Web Worker
+  // --- Web Worker Initialization and Message Handling ---
   useEffect(() => {
-    // Assign the imported worker instance to the ref
     workerInstanceRef.current = SlicerWorker;
 
     workerInstanceRef.current.onmessage = (event) => {
       const { type, payload } = event.data;
-      if (type === 'slicingComplete' && sceneRef.current) { // Ensure sceneRef.current is available
-        // Clear old slices before rendering new ones
+      if (type === 'slicingComplete' && sceneRef.current) {
         clearSlices(sceneRef.current);
         
         payload.forEach(sliceData => {
           const { contours, isFallback } = sliceData;
-          
           if (contours.length === 0) return;
 
-          // If isFallback is true, it means we are rendering raw segments (pairs of points)
-          // Otherwise, it implies ClipperLib successfully generated closed contours
-          const materialColor = isFallback ? 0x00ff00 : 0xff0000; // Green for fallback (raw segments), Red for Clipper (closed contours)
+          const materialColor = isFallback ? 0x00ff00 : 0xff0000;
           const sliceMaterial = new THREE.LineBasicMaterial({ color: materialColor });
-
           const sliceGeometry = new THREE.BufferGeometry();
           sliceGeometry.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(contours), 3));
 
           let sliceLine;
           if (isFallback) {
-            // For raw segments, it's LineSegments (pairs of points)
             sliceLine = new THREE.LineSegments(sliceGeometry, sliceMaterial);
           } else {
-            // For Clipper contours, it's LineLoop (closed polygon)
-            // Ensure the loop is closed by duplicating the first point if necessary
             const positions = sliceGeometry.attributes.position.array;
             const firstPointX = positions[0];
             const firstPointY = positions[1];
@@ -105,152 +88,32 @@ const STLViewer = ({ stlFile }) => {
           }
           
           sliceLine.name = "sliceLine";
-          sceneRef.current.add(sliceLine); // Add slices to the main scene
+          sceneRef.current.add(sliceLine);
         });
       }
     };
+  }, []);
 
-    // No need to terminate here as the worker is a singleton created outside the component
-    // If you wanted a new worker instance per component mount, you'd create `new Worker(...)` here
-    // and return `workerInstanceRef.current.terminate()` in the cleanup.
-    // For performance, a single shared worker is often better for this kind of task.
-    // However, if the worker needs to be reset or if multiple instances are needed,
-    // you would manage its lifecycle within this useEffect.
-  }, []); // Empty dependency array means this runs once on mount
-
-  // Custom debounce hook for slicing parameters
+  // --- Debounce for Slicing Parameters ---
   useEffect(() => {
     const handler = setTimeout(() => {
       setDebouncedSlicingParams(slicingParams);
-    }, 200); // Debounce delay: 200ms
-
-    return () => {
-      clearTimeout(handler);
-    };
+    }, 200);
+    return () => clearTimeout(handler);
   }, [slicingParams]);
 
 
-  // --- 4. UI Controls Handlers ---
-  const handleSliceHeightChange = (e) => {
-    setSlicingParams((p) => ({
-      ...p,
-      sliceHeight: parseFloat(e.target.value),
-      singleSliceMode: false,
-      currentLayerIndex: 0, // Reset layer index when height changes
-    }));
-    setShowMiddleSlice(false); // Disable middle slice when height changes
-  };
-
-  const handlePlaneChange = (e) => {
-    setSlicingParams((p) => ({
-      ...p,
-      slicingPlane: e.target.value,
-      singleSliceMode: false,
-      currentLayerIndex: 0, // Reset layer index when plane changes
-    }));
-    setShowMiddleSlice(false); // Disable middle slice when plane changes
-  };
-
-  const handleToggleSlices = () => {
-    setSlicingParams((p) => ({ ...p, showSlices: !p.showSlices }));
-  };
-
-  const handleStepChange = (e) => {
-    const newLayerIndex = parseInt(e.target.value, 10);
-    // Calculate the actual slice coordinate based on the layer index
-    const calculatedSliceValue = getScaledMinRangeValue() + newLayerIndex * slicingParams.sliceHeight;
-
-    setSlicingParams((p) => ({
-      ...p,
-      currentLayerIndex: newLayerIndex,
-      currentSliceValue: calculatedSliceValue, // Update the actual coordinate
-      singleSliceMode: true,
-      showSlices: true,
-    }));
-    setShowMiddleSlice(false); // Disable middle slice when manual slice is adjusted
-  };
-
-  const handleToggleSingleSliceMode = () => {
-    setSlicingParams((p) => ({
-      ...p,
-      singleSliceMode: !p.singleSliceMode,
-    }));
-    setShowMiddleSlice(false); // Disable middle slice when toggling single slice mode
-  };
-
-  // Handler for model outline visibility
-  const handleToggleModelOutline = () => {
-    setShowModelOutline(prev => !prev);
-  };
-
-  // Handler for middle slice visibility
-  const handleToggleMiddleSlice = () => {
-    setShowMiddleSlice(prev => !prev);
-    // When middle slice is toggled, disable single slice mode and show all slices
-    setSlicingParams(prev => ({
-      ...prev,
-      singleSliceMode: false, // Disable manual single slice
-      showSlices: true, // Ensure slices are visible
-    }));
-  };
-
-  // Handler for showing mini-viewer
-  const handleToggleMiniViewer = () => {
-    setShowMiniViewer(prev => !prev);
-  };
-
-  // New: Handlers for target dimension changes with proportional scaling
-  const handleTargetDimensionChange = (dimension) => (e) => {
-    const inputValue = parseFloat(e.target.value);
-    if (isNaN(inputValue) || inputValue <= 0) {
-      // For proportional scaling, if input is invalid, it's better to revert to current
-      // or simply not update, to avoid breaking aspect ratio with 0 or NaN.
-      return;
-    }
-
-    if (originalDimensions.x === 0 || originalDimensions.y === 0 || originalDimensions.z === 0) {
-        // This case should ideally not happen if originalDimensions are always > 0
-        // If original dimension is zero, we can't calculate a proportional scale.
-        // Just set the target dimension directly for the changed axis.
-        setTargetDimensions(prev => ({
-            ...prev,
-            [dimension]: inputValue
-        }));
-        return;
-    }
-
-    let scaleFactor = 1;
-    if (dimension === 'width') {
-      scaleFactor = inputValue / originalDimensions.x;
-    } else if (dimension === 'height') {
-      scaleFactor = inputValue / originalDimensions.y;
-    } else if (dimension === 'depth') {
-      scaleFactor = inputValue / originalDimensions.z;
-    }
-
-    // Apply the calculated scaleFactor to all dimensions based on original dimensions
-    const newTargetWidth = originalDimensions.x * scaleFactor;
-    const newTargetHeight = originalDimensions.y * scaleFactor;
-    const newTargetDepth = originalDimensions.z * scaleFactor;
-
-    setTargetDimensions({
-      width: newTargetWidth,
-      height: newTargetHeight,
-      depth: newTargetDepth,
-    });
-  };
-
-
-  // --- Main Scene Setup ---
+  // --- Three.js Scene Initialization (Runs only once) ---
   useEffect(() => {
     const mount = mountRef.current;
-    if (!mount) return;
+    const miniViewerMount = miniViewerMountRef.current;
+    if (!mount || !miniViewerMount) return;
 
-    // Cleanup previous scene elements if they exist
-    while (mount.firstChild) {
-      mount.removeChild(mount.firstChild);
-    }
+    // Clear any existing canvas elements to prevent multiple contexts
+    while (mount.firstChild) mount.removeChild(mount.firstChild);
+    while (miniViewerMount.firstChild) miniViewerMount.removeChild(miniViewerMount.firstChild);
 
+    // Main Scene Setup
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x1a1a1a);
     const camera = new THREE.PerspectiveCamera(75, mount.clientWidth / mount.clientHeight, 0.1, 1000);
@@ -273,17 +136,40 @@ const STLViewer = ({ stlFile }) => {
     cameraRef.current = camera;
     controlsRef.current = controls;
 
+    // Mini-Viewer Scene Setup
+    const miniScene = new THREE.Scene();
+    miniScene.background = new THREE.Color(0x333333);
+    const miniCamera = new THREE.PerspectiveCamera(75, miniViewerMount.clientWidth / miniViewerMount.clientHeight, 0.1, 1000);
+    miniCamera.position.set(0, 0, 100);
+    miniScene.add(new THREE.AmbientLight(0xffffff, 0.6));
+    const miniDirectionalLight = new THREE.DirectionalLight(0xffffff, 0.8); // Independent light for mini-viewer
+    miniDirectionalLight.position.set(50, 50, 100).normalize();
+    miniScene.add(miniDirectionalLight);
+    const miniRenderer = new THREE.WebGLRenderer({ antialias: true });
+    miniRenderer.setPixelRatio(window.devicePixelRatio);
+    miniRenderer.setSize(miniViewerMount.clientWidth, miniViewerMount.clientHeight);
+    miniViewerMount.appendChild(miniRenderer.domElement);
+
+    miniSceneRef.current = miniScene;
+    miniRendererRef.current = miniRenderer;
+    miniCameraRef.current = miniCamera;
+
+    // Resize Handler
     const handleResize = () => {
       if (cameraRef.current && rendererRef.current && mountRef.current) {
         cameraRef.current.aspect = mountRef.current.clientWidth / mountRef.current.clientHeight;
         cameraRef.current.updateProjectionMatrix();
         rendererRef.current.setSize(mountRef.current.clientWidth, mountRef.current.clientHeight);
       }
+      if (miniCameraRef.current && miniRendererRef.current && miniViewerMountRef.current) {
+        miniCameraRef.current.aspect = miniViewerMountRef.current.clientWidth / miniViewerMountRef.current.clientHeight;
+        miniCameraRef.current.updateProjectionMatrix();
+        miniRendererRef.current.setSize(miniViewerMountRef.current.clientWidth, miniViewerMountRef.current.clientHeight);
+      }
     };
-    // Use { passive: true } for scroll-blocking event listeners where appropriate
     window.addEventListener("resize", handleResize, { passive: true });
 
-    // Single animation loop for both viewers
+    // Animation Loop (single loop for both renderers)
     let animationFrameId;
     const animate = () => {
       animationFrameId = requestAnimationFrame(animate);
@@ -297,99 +183,24 @@ const STLViewer = ({ stlFile }) => {
       if (showMiniViewer && miniRendererRef.current && miniSceneRef.current && miniCameraRef.current && cameraRef.current && controlsRef.current) {
         miniCameraRef.current.position.copy(cameraRef.current.position);
         miniCameraRef.current.quaternion.copy(cameraRef.current.quaternion);
-        // Ensure mini-viewer looks at the same target as main viewer
-        miniCameraRef.current.lookAt(controlsRef.current.target);
+        miniCameraRef.current.lookAt(controlsRef.current.target); // Ensure mini-viewer looks at the same target
         miniRendererRef.current.render(miniSceneRef.current, miniCameraRef.current);
       }
     };
-    animate(); // Start the single animation loop
+    animate();
 
+    // Cleanup function for useEffect
     return () => {
       window.removeEventListener("resize", handleResize);
+      cancelAnimationFrame(animationFrameId);
       if (controlsRef.current) controlsRef.current.dispose();
       if (rendererRef.current) rendererRef.current.dispose();
-      cancelAnimationFrame(animationFrameId); // Stop the animation loop
+      if (miniRendererRef.current) miniRendererRef.current.dispose();
     };
-  }, [showMiniViewer]); // showMiniViewer is still a dependency because the mini-viewer rendering is conditional inside the main animate loop.
+  }, []); // Empty dependency array ensures this runs only once
 
-  // --- Mini-Viewer Setup (Independent from main viewer's useEffect) ---
-  useEffect(() => {
-    const miniViewerMount = miniViewerMountRef.current;
-    if (!miniViewerMount) return;
 
-    if (!showMiniViewer) {
-      // Cleanup mini-viewer when it's hidden
-      if (miniRendererRef.current) {
-        miniRendererRef.current.dispose();
-        miniRendererRef.current = null;
-        miniSceneRef.current = null;
-        miniCameraRef.current = null;
-      }
-      return;
-    }
-
-    // Clear existing children before setting up
-    while (miniViewerMount.firstChild) {
-      miniViewerMount.removeChild(miniViewerMount.firstChild);
-    }
-
-    const miniScene = new THREE.Scene();
-    miniScene.background = new THREE.Color(0x333333); // Different background for mini-viewer
-
-    const miniCamera = new THREE.PerspectiveCamera(75, miniViewerMount.clientWidth / miniViewerMount.clientHeight, 0.1, 1000);
-    miniCamera.position.set(0, 0, 100);
-    miniScene.add(new THREE.AmbientLight(0xffffff, 0.6));
-    // Re-create directional light for mini-scene to ensure independence
-    const miniDirectionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    miniDirectionalLight.position.set(50, 50, 100).normalize();
-    miniScene.add(miniDirectionalLight);
-
-    const miniRenderer = new THREE.WebGLRenderer({ antialias: true });
-    miniRenderer.setPixelRatio(window.devicePixelRatio);
-    miniRenderer.setSize(miniViewerMount.clientWidth, miniViewerMount.clientHeight);
-    miniViewerMount.appendChild(miniRenderer.domElement);
-
-    miniSceneRef.current = miniScene;
-    miniRendererRef.current = miniRenderer;
-    miniCameraRef.current = miniCamera;
-
-    // Add the model to the mini-viewer if geometry is already loaded
-    if (geometry) {
-      const miniMesh = new THREE.Mesh(geometry, new THREE.MeshPhongMaterial({ color: 0x00aaff, transparent: false, opacity: 1 }));
-      const center = new THREE.Vector3();
-      geometry.boundingBox.getCenter(center);
-      miniMesh.position.sub(center);
-      miniMesh.name = "miniStlMesh";
-      miniMesh.scale.set(currentScale.x, currentScale.y, currentScale.z); // Apply current scale
-      miniScene.add(miniMesh);
-
-      const size = new THREE.Vector3();
-      geometry.boundingBox.getSize(size);
-      size.x *= currentScale.x; size.y *= currentScale.y; size.z *= currentScale.z;
-      const maxDim = Math.max(size.x, size.y, size.z);
-      const fov = miniCamera.fov * (Math.PI / 180);
-      let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
-      cameraZ *= 1.5;
-      miniCamera.position.set(center.x * currentScale.x, center.y * currentScale.y, center.z * currentScale.z + cameraZ);
-      miniCamera.lookAt(center.x * currentScale.x, center.y * currentScale.y, center.z * currentScale.z);
-    }
-
-    const handleMiniResize = () => {
-      if (miniCameraRef.current && miniRendererRef.current && miniViewerMountRef.current) {
-        miniCameraRef.current.aspect = miniViewerMountRef.current.clientWidth / miniViewerMountRef.current.clientHeight;
-        miniCameraRef.current.updateProjectionMatrix();
-        miniRendererRef.current.setSize(miniViewerMountRef.current.clientWidth, miniViewerMountRef.current.clientHeight);
-      }
-    };
-    window.addEventListener("resize", handleMiniResize, { passive: true });
-
-    return () => {
-      window.removeEventListener("resize", handleMiniResize);
-      // Cleanup is handled by the `if (!showMiniViewer)` block
-    };
-  }, [showMiniViewer, geometry, currentScale]); // Added geometry and currentScale to dependencies for mini-viewer mesh update
-
-  // --- STL Loader & Mesh Setup (for both viewers) ---
+  // --- STL File Loading and Mesh Creation ---
   useEffect(() => {
     if (!sceneRef.current || !stlFile) return;
 
@@ -403,11 +214,7 @@ const STLViewer = ({ stlFile }) => {
       setOriginalDimensions({ x: initialSize.x, y: initialSize.y, z: initialSize.z });
       setTargetDimensions({ width: initialSize.x, height: initialSize.y, depth: initialSize.z });
 
-      const material = new THREE.MeshPhongMaterial({
-        color: 0x00aaff,
-        transparent: false,
-        opacity: 1,
-      });
+      const material = new THREE.MeshPhongMaterial({ color: 0x00aaff, transparent: false, opacity: 1 });
       const mesh = new THREE.Mesh(loadedGeometry, material);
       const center = new THREE.Vector3();
       loadedGeometry.boundingBox.getCenter(center);
@@ -418,44 +225,38 @@ const STLViewer = ({ stlFile }) => {
       const existingMesh = sceneRef.current.getObjectByName("stlMesh");
       if (existingMesh) {
         sceneRef.current.remove(existingMesh);
-        if (existingMesh.geometry) existingMesh.geometry.dispose();
-        if (existingMesh.material) existingMesh.material.dispose();
+        existingMesh.geometry.dispose();
+        existingMesh.material.dispose();
       }
       const existingOutline = sceneRef.current.getObjectByName("modelOutline");
       if (existingOutline) {
         sceneRef.current.remove(existingOutline);
-        if (existingOutline.geometry) existingOutline.geometry.dispose();
-        if (existingOutline.material) existingOutline.material.dispose();
+        existingOutline.geometry.dispose();
+        existingOutline.material.dispose();
       }
       sceneRef.current.add(mesh);
 
       const edges = new THREE.EdgesGeometry(loadedGeometry, 30);
       const outlineMaterial = new THREE.LineBasicMaterial({
-        color: 0x000000,
-        linewidth: 2,
-        transparent: true,
-        opacity: 0.8,
-        depthTest: true,
-        depthWrite: false
+        color: 0x000000, linewidth: 2, transparent: true, opacity: 0.8, depthTest: true, depthWrite: false
       });
       const modelOutlines = new THREE.LineSegments(edges, outlineMaterial);
       modelOutlines.name = "modelOutline";
       sceneRef.current.add(modelOutlines);
 
-      // Add/update mesh in mini-viewer if it's active
+      // Add/update mesh in mini-viewer
       if (miniSceneRef.current) {
         const miniMesh = mesh.clone();
         miniMesh.name = "miniStlMesh";
         const existingMiniMesh = miniSceneRef.current.getObjectByName("miniStlMesh");
         if (existingMiniMesh) {
           miniSceneRef.current.remove(existingMiniMesh);
-          if (existingMiniMesh.geometry) existingMiniMesh.geometry.dispose();
-          if (existingMiniMesh.material) existingMiniMesh.material.dispose();
+          existingMiniMesh.geometry.dispose();
+          existingMiniMesh.material.dispose();
         }
         miniSceneRef.current.add(miniMesh);
 
-        // Position mini-viewer camera
-        if (miniCameraRef.current) { // miniViewerState.controls is not used here for positioning
+        if (miniCameraRef.current) {
           const size = new THREE.Vector3();
           loadedGeometry.boundingBox.getSize(size);
           const maxDim = Math.max(size.x, size.y, size.z);
@@ -483,9 +284,10 @@ const STLViewer = ({ stlFile }) => {
     }, undefined, (error) => {
       console.error("Error loading STL file:", error);
     });
-  }, [stlFile, sceneRef, miniSceneRef, miniCameraRef]); // Dependencies adjusted
+  }, [stlFile]); // Only re-run when stlFile changes
 
-  // --- Effect to handle model scaling and camera adjustment (main and mini-viewer) ---
+
+  // --- Effect to handle model scaling and camera adjustment ---
   useEffect(() => {
     if (!geometry || !sceneRef.current || originalDimensions.x === 0 || originalDimensions.y === 0 || originalDimensions.z === 0) {
       return;
@@ -512,7 +314,7 @@ const STLViewer = ({ stlFile }) => {
     }
     setCurrentScale({ x: newScaleX, y: newScaleY, z: newScaleZ });
 
-    // Update camera and controls based on new scale for main viewer
+    // Adjust camera for main viewer
     if (cameraRef.current && controlsRef.current) {
       const scaledSize = new THREE.Vector3(
         originalDimensions.x * newScaleX,
@@ -534,7 +336,7 @@ const STLViewer = ({ stlFile }) => {
       controlsRef.current.update();
     }
 
-    // Update camera for mini-viewer as well
+    // Adjust camera for mini-viewer
     if (miniCameraRef.current && miniMesh) {
       const scaledSize = new THREE.Vector3();
       geometry.boundingBox.getSize(scaledSize);
@@ -561,9 +363,9 @@ const STLViewer = ({ stlFile }) => {
       currentLayerIndex: 0,
     }));
     setShowMiddleSlice(false);
-  }, [targetDimensions, originalDimensions, geometry, sceneRef, cameraRef, controlsRef, miniSceneRef, miniCameraRef]);
+  }, [targetDimensions, originalDimensions, geometry]); // Removed sceneRef, cameraRef, controlsRef, miniSceneRef, miniCameraRef from deps
 
-  // --- Effect to update model outline visibility when showModelOutline changes ---
+  // --- Effect to update model outline visibility ---
   useEffect(() => {
     if (sceneRef.current) {
       const modelOutline = sceneRef.current.getObjectByName("modelOutline");
@@ -571,7 +373,7 @@ const STLViewer = ({ stlFile }) => {
         modelOutline.visible = showModelOutline;
       }
     }
-  }, [showModelOutline, sceneRef]);
+  }, [showModelOutline]);
 
   // --- Effect to toggle main model visibility based on showMiniViewer ---
   useEffect(() => {
@@ -585,9 +387,13 @@ const STLViewer = ({ stlFile }) => {
         modelOutline.visible = !showMiniViewer && showModelOutline;
       }
     }
-  }, [showMiniViewer, sceneRef, showModelOutline]);
+    // Toggle mini-viewer div display
+    if (miniViewerMountRef.current) {
+      miniViewerMountRef.current.style.display = showMiniViewer ? 'block' : 'none';
+    }
+  }, [showMiniViewer, showModelOutline]); // sceneRef is implicitly used via getObjectByName
 
-  // --- Send slicing request to worker when debounced params or geometry change ---
+  // --- Send slicing request to worker ---
   useEffect(() => {
     if (geometry && sceneRef.current && workerInstanceRef.current) {
       clearSlices(sceneRef.current);
@@ -626,17 +432,18 @@ const STLViewer = ({ stlFile }) => {
         });
       }
     }
-  }, [debouncedSlicingParams, geometry, sceneRef, showMiddleSlice, currentScale]);
+  }, [debouncedSlicingParams, geometry, showMiddleSlice, currentScale]); // sceneRef is implicitly used via clearSlices
+
 
   // --- Utility Functions ---
-  const clearSlices = (scene) => {
+  const clearSlices = useCallback((scene) => {
     const slices = scene.children.filter((child) => child.name === "sliceLine");
     slices.forEach((line) => {
       scene.remove(line);
       if (line.geometry) line.geometry.dispose();
       if (line.material) line.material.dispose();
     });
-  };
+  }, []);
 
   const getScaledMinRangeValue = useCallback((geom = geometry, plane = slicingParams.slicingPlane, scaleX = currentScale.x, scaleY = currentScale.y, scaleZ = currentScale.z) => {
     if (!geom || !geom.boundingBox) return 0;
@@ -656,7 +463,7 @@ const STLViewer = ({ stlFile }) => {
     return maxVal;
   }, [geometry, slicingParams.slicingPlane, currentScale]);
 
-  // --- Export Functions ---
+  // --- Export Functions (unchanged) ---
   const exportSVG = () => {
     if (!sceneRef.current) return;
     const lines = sceneRef.current.children.filter((child) => child.name === "sliceLine");
@@ -1003,21 +810,21 @@ ${svgPaths}
         </button>
       </div>
       <div ref={mountRef} style={{ width: "100%", height: "calc(100vh - 50px)" }} />
-      {showMiniViewer && (
-        <div 
-          ref={miniViewerMountRef} 
-          style={{ 
-            position: 'absolute', 
-            top: '10px', 
-            right: '10px', 
-            width: '25%', 
-            height: '25%', 
-            border: '1px solid #555', 
-            boxShadow: '0 0 10px rgba(0,0,0,0.5)',
-            zIndex: 9
-          }} 
-        />
-      )}
+      {/* Mini-viewer div, its display is toggled by showMiniViewer state */}
+      <div 
+        ref={miniViewerMountRef} 
+        style={{ 
+          position: 'absolute', 
+          top: '10px', 
+          right: '10px', 
+          width: '25%', 
+          height: '25%', 
+          border: '1px solid #555', 
+          boxShadow: '0 0 10px rgba(0,0,0,0.5)',
+          zIndex: 9,
+          display: showMiniViewer ? 'block' : 'none' // Controlled by state
+        }} 
+      />
     </div>
   );
 };
