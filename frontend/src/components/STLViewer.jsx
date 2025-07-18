@@ -3,7 +3,12 @@ import * as THREE from "three";
 import { STLLoader } from "three-stdlib";
 import { OrbitControls } from "three-stdlib";
 import { saveAs } from "file-saver";
-import * as ClipperLib from 'js-clipper';
+// No direct ClipperLib import here anymore, it's in the worker
+
+// Import the worker file
+// In Create React App, this syntax is typically handled by webpack
+// For other setups, you might need a worker-loader or similar configuration
+import SlicerWorker from '../workers/slicerWorker.js';
 
 const STLViewer = ({ stlFile }) => {
   // --- 1. Model and Geometry State ---
@@ -22,8 +27,65 @@ const STLViewer = ({ stlFile }) => {
 
   // --- Debounce state for slicing ---
   const [debouncedSlicingParams, setDebouncedSlicingParams] = useState(slicingParams);
+  // State to hold the worker instance
+  const workerRef = useRef(null);
 
-  // Custom debounce hook (or simple implementation directly in useEffect)
+  // Initialize Web Worker
+  useEffect(() => {
+    workerRef.current = new SlicerWorker();
+
+    workerRef.current.onmessage = (event) => {
+      const { type, payload } = event.data;
+      if (type === 'slicingComplete') {
+        // Clear old slices before rendering new ones
+        clearSlices(sceneState.scene);
+        
+        payload.forEach(sliceData => {
+          const { value: slicePlaneValue, contours, isFallback, plane } = sliceData;
+          
+          if (contours.length === 0) return;
+
+          const materialColor = isFallback ? 0x00ff00 : 0xff0000; // Green for fallback, Red for Clipper
+          const sliceMaterial = new THREE.LineBasicMaterial({ color: materialColor });
+
+          // Contours are flattened arrays of coordinates
+          const sliceGeometry = new THREE.BufferGeometry();
+          sliceGeometry.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(contours), 3));
+
+          let sliceLine;
+          if (isFallback) {
+            // For raw segments, it's LineSegments (pairs of points)
+            sliceLine = new THREE.LineSegments(sliceGeometry, sliceMaterial);
+          } else {
+            // For Clipper contours, it's LineLoop (closed polygon)
+            // Need to ensure the loop is closed by duplicating the first point if not already
+            // ClipperLib.PolyTreeToPaths usually returns closed paths, but for safety:
+            const positions = sliceGeometry.attributes.position.array;
+            if (positions[0] !== positions[positions.length - 3] ||
+                positions[1] !== positions[positions.length - 2] ||
+                positions[2] !== positions[positions.length - 1]) {
+                const closedPositions = new Float32Array(positions.length + 3);
+                closedPositions.set(positions);
+                closedPositions.set([positions[0], positions[1], positions[2]], positions.length);
+                sliceGeometry.setAttribute('position', new THREE.Float32BufferAttribute(closedPositions, 3));
+            }
+            sliceLine = new THREE.LineLoop(sliceGeometry, sliceMaterial);
+          }
+          
+          sliceLine.name = "sliceLine";
+          sceneState.scene.add(sliceLine);
+        });
+      }
+    };
+
+    return () => {
+      if (workerRef.current) {
+        workerRef.current.terminate(); // Terminate worker on component unmount
+      }
+    };
+  }, [sceneState.scene]); // Dependency on sceneState.scene to ensure worker is ready
+
+  // Custom debounce hook
   useEffect(() => {
     const handler = setTimeout(() => {
       setDebouncedSlicingParams(slicingParams);
@@ -124,7 +186,7 @@ const STLViewer = ({ stlFile }) => {
       controls.dispose();
       renderer.dispose();
     };
-  }, []);
+  }, []); // Empty dependency array means this runs once on mount
 
   // --- 1. STL Loader & Mesh Setup ---
   useEffect(() => {
@@ -165,8 +227,9 @@ const STLViewer = ({ stlFile }) => {
         sceneState.controls.update();
       }
 
-      // Initial slicing (now debounced)
+      // Trigger slicing via worker after geometry is loaded
       // The actual slicing logic will be triggered by the debouncedSlicingParams useEffect
+      // and sent to the worker.
     },
     undefined,
     (error) => {
@@ -175,26 +238,36 @@ const STLViewer = ({ stlFile }) => {
     });
   }, [stlFile, sceneState.scene, sceneState.camera, sceneState.controls]);
 
-  // --- Re-slice when debouncedSlicingParams change (if geometry exists) ---
-  // This useEffect now depends on debouncedSlicingParams
+  // --- Send slicing request to worker when debounced params or geometry change ---
   useEffect(() => {
-    if (geometry && sceneState.scene) {
-      clearSlices(sceneState.scene);
+    if (geometry && sceneState.scene && workerRef.current) {
+      clearSlices(sceneState.scene); // Clear old slices immediately
       if (debouncedSlicingParams.showSlices) {
         let sliceValueToRender = null;
         if (debouncedSlicingParams.singleSliceMode) {
           sliceValueToRender = debouncedSlicingParams.currentSlice;
         }
-        const slicesData = getSliceSegments(
-          geometry,
-          debouncedSlicingParams.sliceHeight,
-          sliceValueToRender,
-          debouncedSlicingParams.slicingPlane
-        );
-        renderSlicesWithClipper(slicesData, sceneState.scene, debouncedSlicingParams.slicingPlane);
+
+        // Prepare data for the worker (transferable objects like Float32Array)
+        const positionArray = geometry.attributes.position.array;
+        const bboxData = {
+          min: geometry.boundingBox.min.toArray(),
+          max: geometry.boundingBox.max.toArray(),
+        };
+
+        workerRef.current.postMessage({
+          type: 'sliceModel',
+          payload: {
+            positionArray: positionArray,
+            bboxData: bboxData,
+            sliceHeight: debouncedSlicingParams.sliceHeight,
+            currentSlice: sliceValueToRender,
+            slicingPlane: debouncedSlicingParams.slicingPlane,
+          }
+        }, [positionArray.buffer]); // Transferable array buffer for performance
       }
     }
-  }, [debouncedSlicingParams, geometry, sceneState.scene]); // Depends on debounced state
+  }, [debouncedSlicingParams, geometry, sceneState.scene]); // Depends on debounced state and geometry
 
   // --- 6. Utility Functions ---
   const clearSlices = (scene) => {
@@ -205,213 +278,6 @@ const STLViewer = ({ stlFile }) => {
       if (line.material) line.material.dispose();
     });
   };
-
-  /**
-   * getSliceSegments
-   * Extracts raw intersection points (segments) for each slice plane.
-   * This function focuses only on finding the intersections, not on contour reconstruction.
-   * @param {THREE.BufferGeometry} geometry The geometry to slice.
-   * @param {number} heightStep The height between slices.
-   * @param {number | null} currentSliceVal If not null, only slice at this specific value.
-   * @param {'X' | 'Y' | 'Z'} plane The slicing plane (e.g., 'Z' for XY slices).
-   * @returns {Array<{ value: number, segments: Array<Array<THREE.Vector3>> }>} An array of objects,
-   * each containing the slice plane value and its raw segments.
-   */
-  const getSliceSegments = useCallback((geometry, heightStep, currentSliceVal, plane) => {
-    const pos = geometry.attributes.position;
-    const bbox = geometry.boundingBox;
-    const slicesData = [];
-
-    if (!bbox) {
-      console.warn("Bounding box not computed for geometry. Cannot slice.");
-      return slicesData;
-    }
-
-    let axis;
-    let min, max;
-    if (plane === "Z") {
-      axis = "z";
-      min = bbox.min.z;
-      max = bbox.max.z;
-    } else if (plane === "X") {
-      axis = "x";
-      min = bbox.min.x;
-      max = bbox.max.x;
-    } else {
-      axis = "y";
-      min = bbox.min.y;
-      max = bbox.max.y;
-    }
-
-    const valuesToSlice =
-      currentSliceVal !== null
-        ? [currentSliceVal]
-        : Array.from({ length: Math.floor((max - min) / heightStep) + 1 }, (_, i) => min + i * heightStep);
-
-    const p1 = new THREE.Vector3();
-    const p2 = new THREE.Vector3();
-    const p3 = new THREE.Vector3();
-
-    // Increased epsilon for filtering very small segments
-    const epsilon = 1e-5; // Increased from 1e-6
-
-    valuesToSlice.forEach((value) => {
-      const segmentsForCurrentSlice = [];
-
-      for (let i = 0; i < pos.count; i += 3) {
-        p1.fromBufferAttribute(pos, i);
-        p2.fromBufferAttribute(pos, i + 1);
-        p3.fromBufferAttribute(pos, i + 2);
-
-        const triangle = [p1, p2, p3];
-        const currentTriangleIntersectionPoints = [];
-
-        for (let j = 0; j < 3; j++) {
-          const v1 = triangle[j];
-          const v2 = triangle[(j + 1) % 3];
-
-          const val1 = v1[axis];
-          const val2 = v2[axis];
-
-          if (
-            (val1 <= value + epsilon && val2 >= value - epsilon) ||
-            (val2 <= value + epsilon && val1 >= value - epsilon)
-          ) {
-            if (Math.abs(val2 - val1) < epsilon) {
-              continue;
-            }
-
-            const t = (value - val1) / (val2 - val1);
-            const intersectPoint = new THREE.Vector3().lerpVectors(v1, v2, t);
-            currentTriangleIntersectionPoints.push(intersectPoint);
-          }
-        }
-
-        if (currentTriangleIntersectionPoints.length === 2) {
-          if (currentTriangleIntersectionPoints[0].distanceTo(currentTriangleIntersectionPoints[1]) > epsilon) {
-            segmentsForCurrentSlice.push(currentTriangleIntersectionPoints);
-          }
-        }
-      }
-      if (segmentsForCurrentSlice.length > 0) {
-        slicesData.push({ value: value, segments: segmentsForCurrentSlice });
-      }
-    });
-    return slicesData;
-  }, []); // useCallback with empty dependency array for stability
-
-  /**
-   * renderSlicesWithClipper
-   * Renders the slice contours using js-clipper for robust polygon reconstruction.
-   * @param {Array<{ value: number, segments: Array<Array<THREE.Vector3>> }>} slicesData Data for each slice plane.
-   * @param {THREE.Scene} scene The Three.js scene to add lines to.
-   * @param {'X' | 'Y' | 'Z'} plane The slicing plane, used for projection.
-   */
-  const renderSlicesWithClipper = useCallback((slicesData, scene, plane) => {
-    const CL_SCALE = 10000000; // Increased scale factor for ClipperLib (10 million)
-
-    slicesData.forEach(sliceData => {
-      const { value: slicePlaneValue, segments: rawSegments } = sliceData;
-
-      if (rawSegments.length === 0) {
-        return;
-      }
-
-      const clipper = new ClipperLib.Clipper();
-      const subjectPaths = new ClipperLib.Paths();
-
-      rawSegments.forEach(segment => {
-        const p1 = segment[0];
-        const p2 = segment[1];
-
-        let x1, y1, x2, y2;
-
-        if (plane === "Z") {
-          x1 = p1.x; y1 = p1.y;
-          x2 = p2.x; y2 = p2.y;
-        } else if (plane === "X") {
-          x1 = p1.y; y1 = p1.z;
-          x2 = p2.y; y2 = p2.z;
-        } else { // Y plane
-          x1 = p1.x; y1 = p1.z;
-          x2 = p2.x; y2 = p2.z;
-        }
-
-        const intP1 = { X: Math.round(x1 * CL_SCALE), Y: Math.round(y1 * CL_SCALE) };
-        const intP2 = { X: Math.round(x2 * CL_SCALE), Y: Math.round(y2 * CL_SCALE) };
-
-        const path = new ClipperLib.Path();
-        path.push(intP1);
-        path.push(intP2);
-        subjectPaths.push(path);
-      });
-      
-      clipper.AddPaths(subjectPaths, ClipperLib.PolyType.ptSubject, true); 
-
-      const solutionPolyTree = new ClipperLib.PolyTree();
-      let clipperSuccess = false;
-      try {
-        clipperSuccess = clipper.Execute(
-          ClipperLib.ClipType.ctUnion,
-          solutionPolyTree,
-          ClipperLib.PolyFillType.pftNonZero,
-          ClipperLib.PolyFillType.pftNonZero
-        );
-
-        if (!clipperSuccess) {
-          console.warn(`ClipperLib Execute failed for slice at value: ${slicePlaneValue}. Falling back to raw segments.`);
-          rawSegments.forEach(segment => {
-            const segmentGeometry = new THREE.BufferGeometry().setFromPoints(segment);
-            const segmentMaterial = new THREE.LineBasicMaterial({ color: 0x00ff00 });
-            const line = new THREE.LineSegments(segmentGeometry, segmentMaterial);
-            line.name = "sliceLine";
-            scene.add(line);
-          });
-          return;
-        }
-      } catch (e) {
-        console.error(`ClipperLib threw an error for slice at value: ${slicePlaneValue}. Error:`, e, 'Falling back to raw segments. Raw segments:', JSON.stringify(rawSegments.map(s => s.map(p => p.toArray()))));
-        rawSegments.forEach(segment => {
-          const segmentGeometry = new THREE.BufferGeometry().setFromPoints(segment);
-          const segmentMaterial = new THREE.LineBasicMaterial({ color: 0x00ff00 });
-          const line = new THREE.LineSegments(segmentGeometry, segmentMaterial);
-          line.name = "sliceLine";
-          scene.add(line);
-        });
-        return;
-      }
-
-      const solutionPaths = ClipperLib.Clipper.PolyTreeToPaths(solutionPolyTree);
-
-      solutionPaths.forEach(path => {
-        if (path.length < 2) return;
-
-        const threeJsPoints = [];
-        path.forEach(intPoint => {
-          const x = intPoint.X / CL_SCALE;
-          const y = intPoint.Y / CL_SCALE;
-
-          let threeDPoint;
-          if (plane === "Z") {
-            threeDPoint = new THREE.Vector3(x, y, slicePlaneValue);
-          } else if (plane === "X") {
-            threeDPoint = new THREE.Vector3(slicePlaneValue, x, y);
-          } else {
-            threeDPoint = new THREE.Vector3(x, slicePlaneValue, y);
-          }
-          threeJsPoints.push(threeDPoint);
-        });
-
-        if (threeJsPoints.length > 1) {
-          const sliceGeometry = new THREE.BufferGeometry().setFromPoints(threeJsPoints.concat(threeJsPoints[0]));
-          const sliceMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 });
-          const sliceLine = new THREE.LineLoop(sliceGeometry, sliceMaterial);
-          sliceLine.name = "sliceLine";
-          scene.add(sliceLine);
-        }
-      });
-    });
-  }, []); // useCallback with empty dependency array for stability
 
   // --- 5. Export Functions ---
   const exportSVG = () => {
@@ -476,23 +342,26 @@ ${svgPaths}
     let dxfContent = "0\nSECTION\n2\nENTITIES\n";
     lines.forEach((line) => {
       const pos = line.geometry.attributes.position;
-      const numSegments = line instanceof THREE.LineLoop ? pos.count : pos.count / 2;
+      const numPoints = pos.count; // Total number of points in the buffer
 
-      for (let i = 0; i < numSegments; i++) {
+      // If it's a LineLoop, iterate all points and connect last to first.
+      // If it's LineSegments (fallback), iterate in pairs.
+      for (let i = 0; i < numPoints; i++) {
         const p1x = pos.getX(i);
         const p1y = pos.getY(i);
         const p1z = pos.getZ(i);
 
         let nextIndex;
         if (line instanceof THREE.LineLoop) {
-          nextIndex = (i + 1) % pos.count;
-        } else {
-          nextIndex = i * 2 + 1;
-          if (i % 2 === 0) {
-            nextIndex = i + 1;
-          } else {
-            continue;
-          }
+          nextIndex = (i + 1) % numPoints;
+        } else { // LineSegments
+          // For LineSegments, points are already in pairs (p1, p2), (p3, p4), etc.
+          // We only need to process each pair once.
+          if (i % 2 !== 0) continue; // Skip odd indices as they are the 'next' point of a pair
+
+          nextIndex = i + 1;
+          // Ensure nextIndex is within bounds for LineSegments
+          if (nextIndex >= numPoints) continue;
         }
         
         const p2x = pos.getX(nextIndex);
