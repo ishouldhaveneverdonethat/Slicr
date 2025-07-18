@@ -5,7 +5,7 @@ import * as THREE from 'three';
 
 const CL_SCALE = 10000000; // Scale factor for ClipperLib (10 million)
 const EPSILON = 1e-5; // Epsilon for filtering very small segments (e.g., zero length)
-const SNAP_TOLERANCE = 0.001; // Tolerance for snapping points, e.g., 0.001mm (1 micron)
+const SNAP_TOLERANCE = 0.1; // Increased tolerance for snapping points, e.g., 0.1mm
 
 /**
  * getSliceSegments (Worker-side)
@@ -233,7 +233,7 @@ function processSlicesWithClipper(slicesData, plane) {
             );
 
             if (!clipperSuccess) {
-                console.warn(`Worker: ClipperLib Execute failed for slice at value: ${slicePlaneValue}. Falling back to raw segments.`);
+                console.warn(`Worker: ClipperLib Execute failed for slice at value: ${slicePlaneValue}. Falling back to raw segments. Snapped segments:`, JSON.stringify(snappedIntSegments));
                 isFallback = true;
                 rawSegments.forEach(segment => {
                     finalContours.push(...segment[0], ...segment[1]);
@@ -263,7 +263,7 @@ function processSlicesWithClipper(slicesData, plane) {
                 });
             }
         } catch (e) {
-            console.error(`Worker: ClipperLib threw an error for slice at value: ${slicePlaneValue}. Error:`, e, 'Falling back to raw segments. Raw segments:', JSON.stringify(rawSegments));
+            console.error(`Worker: ClipperLib threw an error for slice at value: ${slicePlaneValue}. Error:`, e, 'Falling back to raw segments. Snapped segments:', JSON.stringify(snappedIntSegments));
             isFallback = true;
             rawSegments.forEach(segment => {
                 finalContours.push(...segment[0], ...segment[1]);
