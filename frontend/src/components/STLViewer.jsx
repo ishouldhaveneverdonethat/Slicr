@@ -1,12 +1,8 @@
-// src/components/STLViewer.jsx (No changes needed, use the previous version)
-
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import * as THREE from "three";
 import { STLLoader } from "three-stdlib";
 import { OrbitControls } from "three-stdlib";
 import { saveAs } from "file-saver";
-// Import ClipperLib directly in the worker
-// import * as ClipperLib from 'js-clipper'; // This line is not needed here anymore
 
 // Correct way to import a Web Worker in modern bundlers (like Create React App v5+)
 // This creates a URL for the worker script which can then be instantiated.
@@ -27,6 +23,9 @@ const STLViewer = ({ stlFile }) => {
     singleSliceMode: false,
     slicingPlane: "Z",
   });
+
+  // --- New state for controlling model outline visibility ---
+  const [showModelOutline, setShowModelOutline] = useState(true); // Default to true
 
   // --- Debounce state for slicing ---
   const [debouncedSlicingParams, setDebouncedSlicingParams] = useState(slicingParams);
@@ -100,7 +99,7 @@ const STLViewer = ({ stlFile }) => {
   }, [sceneState.scene]); // Dependency on sceneState.scene to ensure worker is ready
 
 
-  // Custom debounce hook
+  // Custom debounce hook for slicing parameters
   useEffect(() => {
     const handler = setTimeout(() => {
       setDebouncedSlicingParams(slicingParams);
@@ -149,6 +148,12 @@ const STLViewer = ({ stlFile }) => {
     }));
   };
 
+  // Handler for model outline visibility
+  const handleToggleModelOutline = () => {
+    setShowModelOutline(prev => !prev);
+  };
+
+
   // --- 2. Scene Setup and Render ---
   useEffect(() => {
     const mount = mountRef.current;
@@ -164,7 +169,7 @@ const STLViewer = ({ stlFile }) => {
     const camera = new THREE.PerspectiveCamera(75, mount.clientWidth / mount.clientHeight, 0.1, 1000);
     camera.position.set(0, 0, 100);
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    const renderer = new THREE.WebGLRenderer({ antialias: true }); // Enable anti-aliasing
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     mount.appendChild(renderer.domElement);
@@ -221,13 +226,38 @@ const STLViewer = ({ stlFile }) => {
       mesh.name = "stlMesh";
 
       const scene = sceneState.scene;
-      const existing = scene.getObjectByName("stlMesh");
-      if (existing) {
-        scene.remove(existing);
-        if (existing.geometry) existing.geometry.dispose();
-        if (existing.material) existing.material.dispose();
+      const existingMesh = scene.getObjectByName("stlMesh");
+      if (existingMesh) {
+        scene.remove(existingMesh);
+        if (existingMesh.geometry) existingMesh.geometry.dispose();
+        if (existingMesh.material) existingMesh.material.dispose();
       }
       scene.add(mesh);
+
+      // --- Add Model Outline Logic ---
+      const existingOutline = scene.getObjectByName("modelOutline");
+      if (existingOutline) {
+        scene.remove(existingOutline);
+        if (existingOutline.geometry) existingOutline.geometry.dispose();
+        if (existingOutline.material) existingOutline.material.dispose();
+      }
+
+      // Create EdgesGeometry for clean outlines
+      const edges = new THREE.EdgesGeometry(loadedGeometry, 30); // Threshold angle 30 degrees
+      const outlineMaterial = new THREE.LineBasicMaterial({
+        color: 0x000000, // Black outlines
+        linewidth: 2, // Note: linewidth often ignored by WebGL, usually renders as 1px
+        transparent: true,
+        opacity: 0.8,
+        depthTest: true,  // Crucial: only draw if in front of existing geometry
+        depthWrite: false // Crucial: don't write to depth buffer, allows mesh to obscure lines behind it
+      });
+      const modelOutlines = new THREE.LineSegments(edges, outlineMaterial);
+      modelOutlines.name = "modelOutline";
+      modelOutlines.visible = showModelOutline; // Control visibility based on state
+      scene.add(modelOutlines);
+      // --- End Model Outline Logic ---
+
 
       if (sceneState.camera && sceneState.controls) {
         const size = new THREE.Vector3();
@@ -249,9 +279,22 @@ const STLViewer = ({ stlFile }) => {
     undefined,
     (error) => {
       console.error("Error loading STL file:", error);
-      alert("Error loading STL file. Please check the file and try again.");
+      // Using console.log instead of alert() as per instructions
+      console.log("Error loading STL file. Please check the file and try again.");
     });
-  }, [stlFile, sceneState.scene, sceneState.camera, sceneState.controls]);
+  }, [stlFile, sceneState.scene, sceneState.camera, sceneState.controls, showModelOutline]); // Add showModelOutline to dependencies
+
+
+  // --- Effect to update model outline visibility when showModelOutline changes ---
+  useEffect(() => {
+    if (sceneState.scene) {
+      const modelOutline = sceneState.scene.getObjectByName("modelOutline");
+      if (modelOutline) {
+        modelOutline.visible = showModelOutline;
+      }
+    }
+  }, [showModelOutline, sceneState.scene]);
+
 
   // --- Send slicing request to worker when debounced params or geometry change ---
   useEffect(() => {
@@ -302,7 +345,7 @@ const STLViewer = ({ stlFile }) => {
   const exportSVG = () => {
     if (!sceneState.scene) return;
     const lines = sceneState.scene.children.filter((child) => child.name === "sliceLine");
-    if (lines.length === 0) return alert("No slices to export.");
+    if (lines.length === 0) return console.log("No slices to export."); // Using console.log instead of alert()
 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 
@@ -356,7 +399,7 @@ ${svgPaths}
   const exportDXF = () => {
     if (!sceneState.scene) return;
     const lines = sceneState.scene.children.filter((child) => child.name === "sliceLine");
-    if (lines.length === 0) return alert("No slices to export.");
+    if (lines.length === 0) return console.log("No slices to export."); // Using console.log instead of alert()
 
     let dxfContent = "0\nSECTION\n2\nENTITIES\n";
     lines.forEach((line) => {
@@ -457,6 +500,16 @@ ${svgPaths}
             style={{ marginRight: 5 }}
           />
           Show Slices
+        </label>
+
+        <label style={{ marginLeft: 20 }}>
+          <input
+            type="checkbox"
+            checked={showModelOutline} // Use new state
+            onChange={handleToggleModelOutline} // New handler
+            style={{ marginRight: 5 }}
+          />
+          Show Model Outline {/* New UI label */}
         </label>
 
         <label style={{ marginLeft: 20 }}>
