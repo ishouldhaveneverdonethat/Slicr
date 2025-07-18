@@ -347,17 +347,26 @@ const STLViewer = ({ stlFile }) => {
     const lines = sceneState.scene.children.filter((child) => child.name === "sliceLine");
     if (lines.length === 0) return console.log("No slices to export."); // Using console.log instead of alert()
 
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    let svgPaths = "";
+    let currentXOffset = 0;
+    let overallMinX = Infinity;
+    let overallMinY = Infinity;
+    let overallMaxX = -Infinity;
+    let overallMaxY = -Infinity;
+
+    const slicesToExport = []; // Store processed slice data for export
 
     lines.forEach((line) => {
       const pos = line.geometry.attributes.position;
-      // Iterate through segments (pairs of points)
-      for (let i = 0; i < pos.count; i += 2) { // Increment by 2 for segments
+      const segmentsForThisSlice = [];
+      let sliceMinX = Infinity, sliceMinY = Infinity, sliceMaxX = -Infinity, sliceMaxY = -Infinity;
+
+      for (let i = 0; i < pos.count; i += 2) {
         const p1x = pos.getX(i);
         const p1y = pos.getY(i);
         const p1z = pos.getZ(i);
 
+        if (i + 1 >= pos.count) continue;
+        
         const p2x = pos.getX(i + 1);
         const p2y = pos.getY(i + 1);
         const p2z = pos.getZ(i + 1);
@@ -376,18 +385,57 @@ const STLViewer = ({ stlFile }) => {
           px2 = p2x; py2 = p2z;
         }
 
-        minX = Math.min(minX, px1, px2);
-        minY = Math.min(minY, py1, py2);
-        maxX = Math.max(maxX, px1, px2);
-        maxY = Math.max(maxY, py1, py2);
+        sliceMinX = Math.min(sliceMinX, px1, px2);
+        sliceMinY = Math.min(sliceMinY, py1, py2);
+        sliceMaxX = Math.max(sliceMaxX, px1, px2);
+        sliceMaxY = Math.max(sliceMaxY, py1, py2);
 
-        // Create a new path for each segment (M = moveto, L = lineto)
-        // Y-coordinates are inverted for SVG (positive Y is down)
-        svgPaths += `<path d="M ${px1.toFixed(3)} ${(-py1).toFixed(3)} L ${px2.toFixed(3)} ${(-py2).toFixed(3)}" stroke="#${line.material.color.getHexString()}" stroke-width="0.05" fill="none"/>`;
+        segmentsForThisSlice.push({ p1: [px1, py1], p2: [px2, py2] });
+      }
+
+      if (segmentsForThisSlice.length > 0) {
+        const sliceWidth = sliceMaxX - sliceMinX;
+        const sliceHeight = sliceMaxY - sliceMinY;
+
+        slicesToExport.push({
+          segments: segmentsForThisSlice,
+          color: line.material.color.getHexString(),
+          offsetX: currentXOffset,
+          offsetY: 0, // For a single row layout
+          sliceMinX: sliceMinX, // Original min X for this slice
+          sliceMinY: sliceMinY, // Original min Y for this slice
+          sliceHeight: sliceHeight // Height of this slice
+        });
+
+        // Update overall bounding box for viewBox calculation
+        overallMinX = Math.min(overallMinX, currentXOffset + sliceMinX);
+        overallMaxX = Math.max(overallMaxX, currentXOffset + sliceMaxX);
+        overallMinY = Math.min(overallMinY, sliceMinY); // No offsetY for Y bounds
+        overallMaxY = Math.max(overallMaxY, sliceMaxY); // No offsetY for Y bounds
+
+        currentXOffset += sliceWidth + 10; // Add 10mm spacing
       }
     });
 
-    const viewBoxString = `${minX.toFixed(3)} ${(-maxY).toFixed(3)} ${(maxX - minX).toFixed(3)} ${(maxY - minY).toFixed(3)}`;
+    let svgPaths = "";
+    slicesToExport.forEach(sliceData => {
+      sliceData.segments.forEach(segment => {
+        const px1 = segment.p1[0] + sliceData.offsetX;
+        const py1 = segment.p1[1] + sliceData.offsetY;
+        const px2 = segment.p2[0] + sliceData.offsetX;
+        const py2 = segment.p2[1] + sliceData.offsetY;
+
+        svgPaths += `<path d="M ${px1.toFixed(3)} ${(-py1).toFixed(3)} L ${px2.toFixed(3)} ${(-py2).toFixed(3)}" stroke="#${sliceData.color}" stroke-width="0.05" fill="none"/>`;
+      });
+    });
+
+    // Calculate final viewBox based on overall min/max
+    const finalViewBoxMinX = overallMinX;
+    const finalViewBoxMinY = -overallMaxY; // Invert Y for SVG viewBox
+    const finalViewBoxWidth = overallMaxX - overallMinX;
+    const finalViewBoxHeight = overallMaxY - overallMinY;
+
+    const viewBoxString = `${finalViewBoxMinX.toFixed(3)} ${finalViewBoxMinY.toFixed(3)} ${finalViewBoxWidth.toFixed(3)} ${finalViewBoxHeight.toFixed(3)}`;
 
     const svgContent = `<?xml version="1.0" standalone="no"?>
 <svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="${viewBoxString}">
@@ -403,18 +451,21 @@ ${svgPaths}
     const lines = sceneState.scene.children.filter((child) => child.name === "sliceLine");
     if (lines.length === 0) return console.log("No slices to export."); // Using console.log instead of alert()
 
-    let dxfContent = "0\nSECTION\n2\nENTITIES\n";
+    let currentXOffset = 0;
+    const slicesToExport = []; // Store processed slice data for export
+
     lines.forEach((line) => {
       const pos = line.geometry.attributes.position;
-      const numPoints = pos.count; // Total number of points in the buffer
+      const segmentsForThisSlice = [];
+      let sliceMinX = Infinity, sliceMaxX = -Infinity; // Only need X for width calculation
 
-      for (let i = 0; i < numPoints; i += 2) { // Iterate by 2 for start and end of each segment
+      for (let i = 0; i < pos.count; i += 2) { // Iterate by 2 for start and end of each segment
         const p1x = pos.getX(i);
         const p1y = pos.getY(i);
         const p1z = pos.getZ(i);
 
         // Ensure there's a second point for the segment
-        if (i + 1 >= numPoints) continue; 
+        if (i + 1 >= pos.count) continue; 
         
         const p2x = pos.getX(i + 1);
         const p2y = pos.getY(i + 1);
@@ -435,10 +486,44 @@ ${svgPaths}
           dx2 = p2x; dy2 = p2z; dz2 = 0;
         }
 
+        sliceMinX = Math.min(sliceMinX, dx1, dx2);
+        sliceMaxX = Math.max(sliceMaxX, dx1, dx2);
+
+        segmentsForThisSlice.push({ p1: [dx1, dy1, dz1], p2: [dx2, dy2, dz2] });
+      }
+
+      if (segmentsForThisSlice.length > 0) {
+        const sliceWidth = sliceMaxX - sliceMinX;
+
+        slicesToExport.push({
+          segments: segmentsForThisSlice,
+          offsetX: currentXOffset,
+          offsetY: 0 // For a single row layout
+        });
+
+        currentXOffset += sliceWidth + 10; // Add 10mm spacing
+      }
+    });
+
+    let dxfContent = "0\nSECTION\n2\nENTITIES\n";
+    slicesToExport.forEach(sliceData => {
+      sliceData.segments.forEach(segment => {
+        const p1 = segment.p1;
+        const p2 = segment.p2;
+
+        // Apply offset to X coordinate
+        const dx1 = p1[0] + sliceData.offsetX;
+        const dy1 = p1[1];
+        const dz1 = p1[2];
+
+        const dx2 = p2[0] + sliceData.offsetX;
+        const dy2 = p2[1];
+        const dz2 = p2[2];
+        
         // Add a LINE entity for each segment
         dxfContent +=
           `0\nLINE\n8\n0\n10\n${dx1.toFixed(3)}\n20\n${dy1.toFixed(3)}\n30\n${dz1.toFixed(3)}\n11\n${dx2.toFixed(3)}\n21\n${dy2.toFixed(3)}\n31\n${dz2.toFixed(3)}\n`;
-      }
+      });
     });
     dxfContent += "0\nENDSEC\n0\nEOF";
 
