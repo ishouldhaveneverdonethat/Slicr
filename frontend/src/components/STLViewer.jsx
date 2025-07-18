@@ -4,11 +4,12 @@ import { STLLoader } from "three-stdlib";
 import { OrbitControls } from "three-stdlib";
 import { saveAs } from "file-saver";
 
-const STLViewer = ({ stlFile }) => {
+const STLViewer = () => {
   const mountRef = useRef(null);
   const [sceneReady, setSceneReady] = useState(false);
-  const [sceneState, setSceneState] = useState({ scene: null, renderer: null });
+  const [sceneState, setSceneState] = useState({ scene: null, renderer: null, camera: null });
   const [geometry, setGeometry] = useState(null);
+  const [stlFile, setStlFile] = useState(null);
   const [slicingParams, setSlicingParams] = useState({
     sliceHeight: 2,
     showSlices: true,
@@ -16,14 +17,28 @@ const STLViewer = ({ stlFile }) => {
     stepThrough: false,
     slicingPlane: "Z",
   });
-  const [defaultModelLoaded, setDefaultModelLoaded] = useState(false);
+
+  // Load a default mid-sized model URL (example)
+  const defaultModelURL = "https://raw.githubusercontent.com/ishouldhaveneverdonethat/Slicr/main/models/sample.stl";
+
+  const loadSTLFromURL = (url) => {
+    setStlFile(url);
+  };
+
+  // Handle file upload input change
+  const handleFileUpload = (e) => {
+    if (e.target.files.length === 0) return;
+    const file = e.target.files[0];
+    const url = URL.createObjectURL(file);
+    setStlFile(url);
+  };
 
   const handleSliceHeightChange = (e) => {
-    setSlicingParams({ ...slicingParams, sliceHeight: parseFloat(e.target.value) });
+    setSlicingParams({ ...slicingParams, sliceHeight: parseFloat(e.target.value), stepThrough: false });
   };
 
   const handlePlaneChange = (e) => {
-    setSlicingParams({ ...slicingParams, slicingPlane: e.target.value });
+    setSlicingParams({ ...slicingParams, slicingPlane: e.target.value, stepThrough: false, currentSlicePos: 0 });
   };
 
   const handleToggleSlices = () => {
@@ -34,16 +49,16 @@ const STLViewer = ({ stlFile }) => {
     setSlicingParams({ ...slicingParams, currentSlicePos: parseFloat(e.target.value), stepThrough: true });
   };
 
-  // Clear existing slices
+  // Clear previous slices
   const clearSlices = (scene) => {
     const slices = scene.children.filter((child) => child.name === "sliceLine");
     slices.forEach((line) => scene.remove(line));
   };
 
-  // Slice STL geometry at given positions on given axis
+  // Slice STL geometry at specified plane and height(s)
   const sliceSTL = (geometry, scene, heightStep = 2, currentPos = null, plane = "Z") => {
-    if (!geometry.boundingBox) geometry.computeBoundingBox();
     const position = geometry.attributes.position;
+    geometry.computeBoundingBox();
     const bbox = geometry.boundingBox;
 
     let axis, min, max;
@@ -61,16 +76,12 @@ const STLViewer = ({ stlFile }) => {
       max = bbox.max.y;
     }
 
-    // Decide slice positions
-    const values =
-      currentPos !== null
-        ? [currentPos]
-        : Array.from({ length: Math.floor((max - min) / heightStep) + 1 }, (_, i) => min + i * heightStep);
+    const slicePositions =
+      currentPos !== null ? [currentPos] : Array.from({ length: Math.floor((max - min) / heightStep) + 1 }, (_, i) => min + i * heightStep);
 
-    values.forEach((value) => {
+    slicePositions.forEach((value) => {
       const points = [];
 
-      // For each triangle in geometry
       for (let i = 0; i < position.count; i += 3) {
         const p1 = new THREE.Vector3().fromBufferAttribute(position, i);
         const p2 = new THREE.Vector3().fromBufferAttribute(position, i + 1);
@@ -81,11 +92,7 @@ const STLViewer = ({ stlFile }) => {
           const v1 = triangle[j];
           const v2 = triangle[(j + 1) % 3];
 
-          // Check if edge crosses slicing plane
-          if (
-            (v1[axis] <= value && v2[axis] >= value) ||
-            (v2[axis] <= value && v1[axis] >= value)
-          ) {
+          if ((v1[axis] <= value && v2[axis] >= value) || (v2[axis] <= value && v1[axis] >= value)) {
             const t = (value - v1[axis]) / (v2[axis] - v1[axis]);
             const x = v1.x + t * (v2.x - v1.x);
             const y = v1.y + t * (v2.y - v1.y);
@@ -95,15 +102,7 @@ const STLViewer = ({ stlFile }) => {
         }
       }
 
-      // Draw slice lines between consecutive points
       if (points.length > 1) {
-        // Sort points by their 2D projection to try to connect in order (simple approach)
-        points.sort((a, b) => {
-          if (plane === "Z") return a.x - b.x || a.y - b.y;
-          else if (plane === "X") return a.y - b.y || a.z - b.z;
-          else return a.x - b.x || a.z - b.z;
-        });
-
         const sliceGeometry = new THREE.BufferGeometry().setFromPoints(points);
         const sliceMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 });
         const sliceLine = new THREE.LineSegments(sliceGeometry, sliceMaterial);
@@ -113,7 +112,7 @@ const STLViewer = ({ stlFile }) => {
     });
   };
 
-  // Export current slices as SVG or DXF
+  // Export slice data in DXF or SVG with correct axis mapping
   const exportSlices = (format) => {
     const scene = sceneState.scene;
     if (!scene) return;
@@ -121,16 +120,27 @@ const STLViewer = ({ stlFile }) => {
     const lines = scene.children.filter((child) => child.name === "sliceLine");
     if (lines.length === 0) return;
 
+    function projectPoint(v) {
+      const plane = slicingParams.slicingPlane;
+      if (plane === "Z") return { x: v.x, y: v.y };
+      if (plane === "X") return { x: v.y, y: v.z };
+      if (plane === "Y") return { x: v.x, y: v.z };
+      return { x: v.x, y: v.y };
+    }
+
     if (format === "dxf") {
       let dxfContent = "0\nSECTION\n2\nENTITIES\n";
       lines.forEach((line) => {
         const pos = line.geometry.attributes.position;
         for (let i = 0; i < pos.count; i += 2) {
-          const x1 = pos.getX(i).toFixed(2);
-          const y1 = pos.getY(i).toFixed(2);
-          const x2 = pos.getX(i + 1).toFixed(2);
-          const y2 = pos.getY(i + 1).toFixed(2);
-          dxfContent += `0\nLINE\n8\n0\n10\n${x1}\n20\n${y1}\n30\n0\n11\n${x2}\n21\n${y2}\n31\n0\n`;
+          const p1 = new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ ? pos.getZ(i) : 0);
+          const p2 = new THREE.Vector3(pos.getX(i + 1), pos.getY(i + 1), pos.getZ ? pos.getZ(i + 1) : 0);
+          const pt1 = projectPoint(p1);
+          const pt2 = projectPoint(p2);
+
+          dxfContent +=
+            `0\nLINE\n8\n0\n10\n${pt1.x.toFixed(2)}\n20\n${pt1.y.toFixed(2)}\n30\n0\n` +
+            `11\n${pt2.x.toFixed(2)}\n21\n${pt2.y.toFixed(2)}\n31\n0\n`;
         }
       });
       dxfContent += "0\nENDSEC\n0\nEOF";
@@ -143,11 +153,11 @@ const STLViewer = ({ stlFile }) => {
           const pos = line.geometry.attributes.position;
           let pathData = "";
           for (let i = 0; i < pos.count; i += 2) {
-            const x1 = pos.getX(i);
-            const y1 = pos.getY(i);
-            const x2 = pos.getX(i + 1);
-            const y2 = pos.getY(i + 1);
-            pathData += `<path d="M ${x1},${-y1} L ${x2},${-y2}" stroke="red" stroke-width="0.05" fill="none"/>\n`;
+            const p1 = new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ ? pos.getZ(i) : 0);
+            const p2 = new THREE.Vector3(pos.getX(i + 1), pos.getY(i + 1), pos.getZ ? pos.getZ(i + 1) : 0);
+            const pt1 = projectPoint(p1);
+            const pt2 = projectPoint(p2);
+            pathData += `<path d="M ${pt1.x},${-pt1.y} L ${pt2.x},${-pt2.y}" stroke="red" stroke-width="0.05" fill="none"/>\n`;
           }
           return pathData;
         })
@@ -162,23 +172,7 @@ ${svgLines}
     }
   };
 
-  // Load default mid-sized model from URL
-  const loadDefaultModel = () => {
-    // Example default model URL (you can change this to your own)
-    const defaultURL = "https://raw.githubusercontent.com/ishouldhaveneverdonethat/Slicr/main/public/default.stl";
-    setDefaultModelLoaded(true);
-    setGeometry(null);
-    setSceneReady(false);
-    setSlicingParams((p) => ({ ...p, currentSlicePos: 0, stepThrough: false }));
-    // Reset stlFile prop to defaultURL (simulate by updating state or prop in parent)
-    // Since stlFile comes from prop, here just notify parent or handle internally:
-    // For demo: We'll store the URL in a local state and use it inside useEffect loader below
-    setInternalSTL(defaultURL);
-  };
-
-  const [internalSTL, setInternalSTL] = useState(null);
-
-  // Setup scene once
+  // Initialize scene, camera, renderer, controls
   useEffect(() => {
     const mount = mountRef.current;
 
@@ -208,43 +202,43 @@ ${svgLines}
     animate();
 
     setSceneReady(true);
-    setSceneState({ scene, renderer });
+    setSceneState({ scene, renderer, camera });
 
     return () => {
       mount.removeChild(renderer.domElement);
     };
   }, []);
 
-  // Load STL from either prop or internal default URL
+  // Load and render STL + slices on param changes
   useEffect(() => {
-    const fileToLoad = internalSTL || stlFile;
-    if (!sceneReady || !fileToLoad) return;
+    if (!sceneReady || !stlFile) return;
 
     const loader = new STLLoader();
     loader.load(
-      fileToLoad,
-      (geometry) => {
-        geometry.computeBoundingBox();
-        setGeometry(geometry);
+      stlFile,
+      (geom) => {
+        geom.computeBoundingBox();
+        setGeometry(geom);
 
         const material = new THREE.MeshPhongMaterial({ color: 0x00aaff });
-        const mesh = new THREE.Mesh(geometry, material);
+        const mesh = new THREE.Mesh(geom, material);
 
         const center = new THREE.Vector3();
-        geometry.boundingBox.getCenter(center);
+        geom.boundingBox.getCenter(center);
         mesh.position.sub(center);
         mesh.name = "stlMesh";
 
         const scene = sceneState.scene;
         if (!scene) return;
 
+        // Remove old mesh and add new
         const existing = scene.getObjectByName("stlMesh");
         if (existing) scene.remove(existing);
         scene.add(mesh);
 
         clearSlices(scene);
         if (slicingParams.showSlices) {
-          sliceSTL(geometry, scene, slicingParams.sliceHeight, slicingParams.stepThrough ? slicingParams.currentSlicePos : null, slicingParams.slicingPlane);
+          sliceSTL(geom, scene, slicingParams.sliceHeight, slicingParams.stepThrough ? slicingParams.currentSlicePos : null, slicingParams.slicingPlane);
         }
       },
       undefined,
@@ -252,23 +246,25 @@ ${svgLines}
         console.error("Error loading STL:", error);
       }
     );
-  }, [sceneReady, stlFile, internalSTL, slicingParams]);
+  }, [stlFile, sceneReady, slicingParams, sceneState.scene]);
 
   return (
     <div>
       <div style={{ padding: 10 }}>
-        <button onClick={loadDefaultModel} disabled={defaultModelLoaded}>
-          Load Default Mid-Size Model
+        <input type="file" accept=".stl" onChange={handleFileUpload} />
+        <button onClick={() => loadSTLFromURL(defaultModelURL)} style={{ marginLeft: 10 }}>
+          Load Default Mid-Sized Model
         </button>
 
         <label style={{ marginLeft: 20 }}>
-          Slice Height:
+          Slice Height (mm):
           <input
             type="number"
             step="0.1"
             min="0.1"
             value={slicingParams.sliceHeight}
             onChange={handleSliceHeightChange}
+            style={{ width: 60, marginLeft: 5 }}
           />
         </label>
 
@@ -283,7 +279,7 @@ ${svgLines}
 
         <label style={{ marginLeft: 20 }}>
           Plane:
-          <select value={slicingParams.slicingPlane} onChange={handlePlaneChange}>
+          <select value={slicingParams.slicingPlane} onChange={handlePlaneChange} style={{ marginLeft: 5 }}>
             <option value="Z">Z</option>
             <option value="X">X</option>
             <option value="Y">Y</option>
@@ -294,12 +290,13 @@ ${svgLines}
           Step Through:
           <input
             type="range"
-            min={geometry?.boundingBox?.min[slicingParams.slicingPlane.toLowerCase()] || 0}
-            max={geometry?.boundingBox?.max[slicingParams.slicingPlane.toLowerCase()] || 100}
+            min={geometry?.boundingBox?.min[slicingParams.slicingPlane.toLowerCase()] ?? 0}
+            max={geometry?.boundingBox?.max[slicingParams.slicingPlane.toLowerCase()] ?? 100}
             step="0.1"
             value={slicingParams.currentSlicePos}
             onChange={handleStepChange}
-            disabled={!geometry}
+            disabled={!geometry || !slicingParams.showSlices}
+            style={{ verticalAlign: "middle", marginLeft: 5 }}
           />
         </label>
 
