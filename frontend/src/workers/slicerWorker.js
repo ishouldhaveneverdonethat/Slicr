@@ -5,7 +5,7 @@ import * as THREE from 'three';
 
 const CL_SCALE = 10000000; // Scale factor for ClipperLib (10 million)
 const EPSILON = 1e-5; // Epsilon for filtering very small segments (e.g., zero length)
-const SNAP_TOLERANCE = 0.05; // Tolerance for snapping points, e.g., 0.0001mm (0.1 microns)
+const SNAP_TOLERANCE = 0.001; // Tolerance for snapping points, e.g., 0.001mm (1 micron)
 
 /**
  * getSliceSegments (Worker-side)
@@ -106,11 +106,10 @@ function getSliceSegments(positionArray, bboxData, heightStep, currentSliceVal, 
  * Snaps 2D points to a grid to merge nearly coincident points,
  * improving robustness for ClipperLib.
  * @param {Array<Array<number[]>>} rawSegments Array of segments, each [point1_3D, point2_3D].
- * @param {number} slicePlaneValue The Z/X/Y value of the current slice plane.
  * @param {'X' | 'Y' | 'Z'} plane The slicing plane for 2D projection.
  * @returns {Array<Array<ClipperLib.IntPoint>>} Cleaned 2D segments as ClipperLib.IntPoint arrays.
  */
-function snapPointsToGrid(rawSegments, slicePlaneValue, plane) {
+function snapPointsToGrid(rawSegments, plane) {
     const snappedSegments = [];
     const uniquePointsMap = new Map(); // Map<string (key), ClipperLib.IntPoint>
 
@@ -120,33 +119,35 @@ function snapPointsToGrid(rawSegments, slicePlaneValue, plane) {
 
         let x1_2D, y1_2D, x2_2D, y2_2D;
 
-        if (plane === "Z") {
+        if (plane === "Z") { // Project to XY plane
             x1_2D = p1_3D.x; y1_2D = p1_3D.y;
             x2_2D = p2_3D.x; y2_2D = p2_3D.y;
-        } else if (plane === "X") {
+        } else if (plane === "X") { // Project to YZ plane
             x1_2D = p1_3D.y; y1_2D = p1_3D.z;
             x2_2D = p2_3D.y; y2_2D = p2_3D.z;
-        } else { // Y plane
+        } else { // Y plane, project to XZ plane
             x1_2D = p1_3D.x; y1_2D = p1_3D.z;
             x2_2D = p2_3D.x; y2_2D = p2_3D.z;
         }
 
-        // Snap to grid
-        const snapFactor = 1 / SNAP_TOLERANCE; // e.g., 1 / 0.0001 = 10000
-        const snappedX1 = Math.round(x1_2D * snapFactor) / snapFactor;
-        const snappedY1 = Math.round(y1_2D * snapFactor) / snapFactor;
-        const snappedX2 = Math.round(x2_2D * snapFactor) / snapFactor;
-        const snappedY2 = Math.round(y2_2D * snapFactor) / snapFactor;
+        // Snap to grid using SNAP_TOLERANCE
+        // This rounds coordinates to the nearest multiple of SNAP_TOLERANCE
+        const snappedX1 = Math.round(x1_2D / SNAP_TOLERANCE) * SNAP_TOLERANCE;
+        const snappedY1 = Math.round(y1_2D / SNAP_TOLERANCE) * SNAP_TOLERANCE;
+        const snappedX2 = Math.round(x2_2D / SNAP_TOLERANCE) * SNAP_TOLERANCE;
+        const snappedY2 = Math.round(y2_2D / SNAP_TOLERANCE) * SNAP_TOLERANCE;
 
-        // Create unique keys for the snapped points
-        const key1 = `${snappedX1.toFixed(6)},${snappedY1.toFixed(6)}`;
-        const key2 = `${snappedX2.toFixed(6)},${snappedY2.toFixed(6)}`;
+        // Create unique keys for the snapped points (using higher precision for keying)
+        // Using a high precision for toFixed to ensure distinct snapped points get distinct keys
+        const key1 = `${snappedX1.toFixed(10)},${snappedY1.toFixed(10)}`;
+        const key2 = `${snappedX2.toFixed(10)},${snappedY2.toFixed(10)}`;
 
         let intP1, intP2;
 
         if (uniquePointsMap.has(key1)) {
             intP1 = uniquePointsMap.get(key1);
         } else {
+            // Scale up to integers for ClipperLib
             intP1 = { X: Math.round(snappedX1 * CL_SCALE), Y: Math.round(snappedY1 * CL_SCALE) };
             uniquePointsMap.set(key1, intP1);
         }
@@ -158,7 +159,8 @@ function snapPointsToGrid(rawSegments, slicePlaneValue, plane) {
             uniquePointsMap.set(key2, intP2);
         }
 
-        // Only add segment if points are not identical after snapping
+        // Only add segment if points are not identical after snapping AND scaling to ClipperLib integers
+        // This ensures we don't add zero-length segments to ClipperLib
         if (intP1.X !== intP2.X || intP1.Y !== intP2.Y) {
             snappedSegments.push([intP1, intP2]);
         }
@@ -182,14 +184,26 @@ function processSlicesWithClipper(slicesData, plane) {
         const { value: slicePlaneValue, segments: rawSegments } = sliceData;
 
         if (rawSegments.length === 0) {
+            processedSlices.push({
+                value: slicePlaneValue,
+                contours: [], // No contours for this slice
+                isFallback: false, // Not a fallback, just empty
+                plane: plane
+            });
             return;
         }
 
         // Step 1: Snap points to a grid to merge nearly coincident vertices
-        const snappedIntSegments = snapPointsToGrid(rawSegments, slicePlaneValue, plane);
+        const snappedIntSegments = snapPointsToGrid(rawSegments, plane);
 
         if (snappedIntSegments.length === 0) {
-            // After snapping, if no valid segments remain, skip this slice
+            // After snapping, if no valid segments remain, skip this slice or treat as empty
+            processedSlices.push({
+                value: slicePlaneValue,
+                contours: [],
+                isFallback: false,
+                plane: plane
+            });
             return;
         }
 
@@ -227,7 +241,7 @@ function processSlicesWithClipper(slicesData, plane) {
             } else {
                 const solutionPaths = ClipperLib.Clipper.PolyTreeToPaths(solutionPolyTree);
                 solutionPaths.forEach(path => {
-                    if (path.length < 2) return;
+                    if (path.length < 2) return; // Need at least 2 points for a line/contour
                     const threeJsPoints = [];
                     path.forEach(intPoint => {
                         const x = intPoint.X / CL_SCALE;
