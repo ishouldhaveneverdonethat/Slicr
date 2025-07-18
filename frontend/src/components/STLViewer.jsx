@@ -34,7 +34,7 @@ const STLViewer = ({ stlFile }) => {
 
   const [showModelOutline, setShowModelOutline] = useState(true);
   const [showMiddleSlice, setShowMiddleSlice] = useState(false);
-  // Removed showMiniViewer state
+  // Removed showMiniViewer state as it's no longer needed
 
   const [debouncedSlicingParams, setDebouncedSlicingParams] = useState(slicingParams);
   const workerInstanceRef = useRef(null);
@@ -164,8 +164,6 @@ const STLViewer = ({ stlFile }) => {
     }));
   }, []);
 
-  // Removed handleToggleMiniViewer
-
   const handleTargetDimensionChange = useCallback((dimension) => (e) => {
     const inputValue = parseFloat(e.target.value);
     if (isNaN(inputValue) || inputValue <= 0) {
@@ -210,12 +208,10 @@ const STLViewer = ({ stlFile }) => {
   // --- Three.js Scene Initialization (Runs only once) ---
   useEffect(() => {
     const mount = mountRef.current;
-    // Removed miniViewerMount from this useEffect's scope
     if (!mount) return;
 
     // Clear any existing canvas elements to prevent multiple contexts
     while (mount.firstChild) mount.removeChild(mount.firstChild);
-    // Removed miniViewerMount cleanup
 
     // Main Scene Setup
     const scene = new THREE.Scene();
@@ -240,8 +236,6 @@ const STLViewer = ({ stlFile }) => {
     cameraRef.current = camera;
     controlsRef.current = controls;
 
-    // Removed Mini-Viewer Scene Setup
-
     // Resize Handler
     const handleResize = () => {
       if (cameraRef.current && rendererRef.current && mountRef.current) {
@@ -249,7 +243,6 @@ const STLViewer = ({ stlFile }) => {
         cameraRef.current.updateProjectionMatrix();
         rendererRef.current.setSize(mountRef.current.clientWidth, mountRef.current.clientHeight);
       }
-      // Removed mini-viewer resize logic
     };
     window.addEventListener("resize", handleResize, { passive: true });
 
@@ -262,8 +255,6 @@ const STLViewer = ({ stlFile }) => {
       if (rendererRef.current && sceneRef.current && cameraRef.current) {
         rendererRef.current.render(sceneRef.current, cameraRef.current);
       }
-
-      // Removed mini-viewer synchronization logic
     };
     animate();
 
@@ -273,7 +264,6 @@ const STLViewer = ({ stlFile }) => {
       cancelAnimationFrame(animationFrameId);
       if (controlsRef.current) controlsRef.current.dispose();
       if (rendererRef.current) renderer.dispose(); // Use renderer.dispose() directly
-      // Removed miniRendererRef cleanup
     };
   }, []); // Empty dependency array ensures this runs only once
 
@@ -322,8 +312,6 @@ const STLViewer = ({ stlFile }) => {
       modelOutlines.name = "modelOutline";
       sceneRef.current.add(modelOutlines);
 
-      // Removed mini-viewer mesh logic
-
       // Initial camera positioning for main viewer
       if (cameraRef.current && controlsRef.current) {
         const size = new THREE.Vector3();
@@ -350,7 +338,6 @@ const STLViewer = ({ stlFile }) => {
     }
 
     const mesh = sceneRef.current.getObjectByName("stlMesh");
-    // Removed miniMesh reference
     if (!mesh) return;
 
     let newScaleX = 1, newScaleY = 1, newScaleZ = 1;
@@ -365,7 +352,6 @@ const STLViewer = ({ stlFile }) => {
     }
 
     mesh.scale.set(newScaleX, newScaleY, newScaleZ);
-    // Removed miniMesh scaling
     setCurrentScale({ x: newScaleX, y: newScaleY, z: newScaleZ });
 
     // Adjust camera for main viewer
@@ -389,8 +375,6 @@ const STLViewer = ({ stlFile }) => {
       controlsRef.current.target.copy(scaledCenter);
       controlsRef.current.update();
     }
-
-    // Removed mini-viewer camera adjustment
 
     setSlicingParams(prev => ({
       ...prev,
@@ -424,7 +408,6 @@ const STLViewer = ({ stlFile }) => {
         modelOutline.visible = showModelOutline; // Respect outline checkbox
       }
     }
-    // Removed mini-viewer div display toggle
   }, [showModelOutline]); // showMiniViewer removed from deps
 
   // --- Send slicing request to worker ---
@@ -749,8 +732,6 @@ ${svgPaths}
           Show Middle Slice
         </label>
 
-        {/* Removed the "Show Model View" checkbox */}
-
         <label style={{ marginLeft: 20 }}>
           Plane:
           <select value={slicingParams.slicingPlane} onChange={handlePlaneChange} style={{ marginLeft: 5, padding: 3 }}>
@@ -840,7 +821,6 @@ ${svgPaths}
         </button>
       </div>
       <div ref={mountRef} style={{ width: "100%", height: "calc(100vh - 50px)" }} />
-      {/* Removed the mini-viewer div */}
     </div>
   );
 };
