@@ -130,7 +130,7 @@ const STLViewer = ({ stlFile }) => {
 
   const handleStepChange = useCallback((e) => {
     // Defensive check: ensure geometry and currentScale are ready before calculations
-    if (!geometry || currentScale.x === 0 || currentScale.y === 0 || currentScale.z === 0) {
+    if (!geometry || !Number.isFinite(currentScale.x) || !Number.isFinite(currentScale.y) || !Number.isFinite(currentScale.z)) {
       return; // Prevent calculations if essential data is not ready
     }
 
@@ -179,7 +179,13 @@ const STLViewer = ({ stlFile }) => {
       return;
     }
 
-    if (originalDimensions.x === 0 || originalDimensions.y === 0 || originalDimensions.z === 0) {
+    // More robust check for originalDimensions and its properties
+    if (!originalDimensions ||
+        !Number.isFinite(originalDimensions.x) || originalDimensions.x <= 0 ||
+        !Number.isFinite(originalDimensions.y) || originalDimensions.y <= 0 ||
+        !Number.isFinite(originalDimensions.z) || originalDimensions.z <= 0) {
+        // If original dimensions are not valid or not positive, cannot calculate proportional scale.
+        // Just update the single target dimension.
         setTargetDimensions(prev => ({
             ...prev,
             [dimension]: inputValue
@@ -205,7 +211,7 @@ const STLViewer = ({ stlFile }) => {
       height: newTargetHeight,
       depth: newTargetDepth,
     });
-  }, [originalDimensions]); // Dependencies for useCallback
+  }, [originalDimensions]);
 
 
   // --- Three.js Scene Initialization (Runs only once) ---
@@ -468,7 +474,7 @@ const STLViewer = ({ stlFile }) => {
       currentLayerIndex: 0,
     }));
     setShowMiddleSlice(false);
-  }, [targetDimensions, originalDimensions, geometry]); // Removed sceneRef, cameraRef, controlsRef, miniSceneRef, miniCameraRef from deps
+  }, [targetDimensions, originalDimensions, geometry]);
 
   // --- Effect to update model outline visibility ---
   useEffect(() => {
@@ -496,7 +502,7 @@ const STLViewer = ({ stlFile }) => {
     if (miniViewerMountRef.current) {
       miniViewerMountRef.current.style.display = showMiniViewer ? 'block' : 'none';
     }
-  }, [showMiniViewer, showModelOutline]); // sceneRef is implicitly used via getObjectByName
+  }, [showMiniViewer, showModelOutline]);
 
   // --- Send slicing request to worker ---
   useEffect(() => {
@@ -537,7 +543,7 @@ const STLViewer = ({ stlFile }) => {
         });
       }
     }
-  }, [debouncedSlicingParams, geometry, showMiddleSlice, currentScale]); // sceneRef is implicitly used via clearSlices
+  }, [debouncedSlicingParams, geometry, showMiddleSlice, currentScale]);
 
 
   // --- Utility Functions ---
@@ -550,23 +556,23 @@ const STLViewer = ({ stlFile }) => {
     });
   }, []);
 
-  const getScaledMinRangeValue = useCallback((geom = geometry, plane = slicingParams.slicingPlane, scaleX = currentScale.x, scaleY = currentScale.y, scaleZ = currentScale.z) => {
+  const getScaledMinRangeValue = useCallback((geom, plane, scaleX, scaleY, scaleZ) => {
     if (!geom || !geom.boundingBox) return 0;
     const minVal = geom.boundingBox.min[plane.toLowerCase()];
     if (plane === 'X') return minVal * scaleX;
     if (plane === 'Y') return minVal * scaleY;
     if (plane === 'Z') return minVal * scaleZ;
     return minVal;
-  }, [geometry, slicingParams.slicingPlane, currentScale]);
+  }, []); // Removed geometry, slicingParams.slicingPlane, currentScale from dependencies as they are passed as arguments
 
-  const getScaledMaxRangeValue = useCallback((geom = geometry, plane = slicingParams.slicingPlane, scaleX = currentScale.x, scaleY = currentScale.y, scaleZ = currentScale.z) => {
+  const getScaledMaxRangeValue = useCallback((geom, plane, scaleX, scaleY, scaleZ) => {
     if (!geom || !geom.boundingBox) return 100;
     const maxVal = geom.boundingBox.max[plane.toLowerCase()];
     if (plane === 'X') return maxVal * scaleX;
     if (plane === 'Y') return maxVal * scaleY;
     if (plane === 'Z') return maxVal * scaleZ;
     return maxVal;
-  }, [geometry, slicingParams.slicingPlane, currentScale]);
+  }, []); // Removed geometry, slicingParams.slicingPlane, currentScale from dependencies as they are passed as arguments
 
   // --- Export Functions (unchanged) ---
   const exportSVG = () => {
@@ -578,7 +584,7 @@ const STLViewer = ({ stlFile }) => {
     let overallMinX = Infinity;
     let overallMinY = Infinity;
     let overallMaxX = -Infinity;
-    let overallMaxY = -Infinity;
+    let overallMaxY = -Infinity; // Fixed typo here
 
     const slicesToExport = [];
 
@@ -636,7 +642,7 @@ const STLViewer = ({ stlFile }) => {
         overallMinX = Math.min(overallMinX, currentXOffset + sliceMinX);
         overallMaxX = Math.max(overallMaxX, currentXOffset + sliceMaxX);
         overallMinY = Math.min(overallMinY, sliceMinY);
-        overallMaxY = Math.max(overallY, sliceMaxY);
+        overallMaxY = Math.max(overallMaxY, sliceMaxY); // Fixed typo here
 
         currentXOffset += sliceWidth + 10;
       }
@@ -751,8 +757,8 @@ ${svgPaths}
     saveAs(blob, "slice.dxf");
   };
 
-  const minRangeValue = getScaledMinRangeValue();
-  const maxRangeValue = getScaledMaxRangeValue();
+  const minRangeValue = getScaledMinRangeValue(geometry, slicingParams.slicingPlane, currentScale.x, currentScale.y, currentScale.z);
+  const maxRangeValue = getScaledMaxRangeValue(geometry, slicingParams.slicingPlane, currentScale.x, currentScale.y, currentScale.z);
 
   let totalLayers = 0;
   let currentLayerIndex = slicingParams.currentLayerIndex;
