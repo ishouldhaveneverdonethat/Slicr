@@ -32,17 +32,30 @@ function getSliceSegments(positionArray, bboxData, heightStep, currentSliceVal, 
     let min, max;
     if (plane === "Z") {
         axis = "z";
-        min = bboxData.min.z;
-        max = bboxData.max.z;
+        min = bboxData.min[0]; // Access as array element
+        max = bboxData.max[0]; // Access as array element
     } else if (plane === "X") {
         axis = "x";
-        min = bboxData.min.x;
-        max = bboxData.max.x;
+        min = bboxData.min[0]; // Access as array element
+        max = bboxData.max[0]; // Access as array element
     } else { // Y plane
         axis = "y";
-        min = bboxData.min.y;
-        max = bboxData.max.y;
+        min = bboxData.min[1]; // Access as array element
+        max = bboxData.max[1]; // Access as array element
     }
+    
+    // Adjust min/max based on the selected plane for slicing
+    if (plane === "Z") {
+        min = bboxData.min[2]; // Z-axis
+        max = bboxData.max[2]; // Z-axis
+    } else if (plane === "X") {
+        min = bboxData.min[0]; // X-axis
+        max = bboxData.max[0]; // X-axis
+    } else { // Y plane
+        min = bboxData.min[1]; // Y-axis
+        max = bboxData.max[1]; // Y-axis
+    }
+
 
     const valuesToSlice =
         currentSliceVal !== null
