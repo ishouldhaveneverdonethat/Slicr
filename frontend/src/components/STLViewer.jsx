@@ -248,6 +248,8 @@ const STLViewer = ({ stlFile }) => {
     const p2 = new THREE.Vector3();
     const p3 = new THREE.Vector3();
 
+    const epsilon = 1e-6; // Epsilon for floating point comparisons
+
     valuesToSlice.forEach((value) => {
       const segmentsForCurrentSlice = [];
 
@@ -263,7 +265,6 @@ const STLViewer = ({ stlFile }) => {
           const v1 = triangle[j];
           const v2 = triangle[(j + 1) % 3];
 
-          const epsilon = 1e-6;
           const val1 = v1[axis];
           const val2 = v2[axis];
 
@@ -271,7 +272,7 @@ const STLViewer = ({ stlFile }) => {
             (val1 <= value + epsilon && val2 >= value - epsilon) ||
             (val2 <= value + epsilon && val1 >= value - epsilon)
           ) {
-            if (Math.abs(val2 - val1) < epsilon) {
+            if (Math.abs(val2 - val1) < epsilon) { // Edge is co-planar or degenerate
               continue;
             }
 
@@ -282,7 +283,10 @@ const STLViewer = ({ stlFile }) => {
         }
 
         if (currentTriangleIntersectionPoints.length === 2) {
-          segmentsForCurrentSlice.push(currentTriangleIntersectionPoints);
+          // Filter out degenerate segments (points too close)
+          if (currentTriangleIntersectionPoints[0].distanceTo(currentTriangleIntersectionPoints[1]) > epsilon) {
+            segmentsForCurrentSlice.push(currentTriangleIntersectionPoints);
+          }
         }
       }
       if (segmentsForCurrentSlice.length > 0) {
@@ -300,10 +304,7 @@ const STLViewer = ({ stlFile }) => {
    * @param {'X' | 'Y' | 'Z'} plane The slicing plane, used for projection.
    */
   const renderSlicesWithClipper = (slicesData, scene, plane) => {
-    // No explicit check for ClipperLib here, as it's now imported.
-    // If the import fails (e.g., not installed), the app would crash earlier.
-
-    const CL_SCALE = 100000; // Scale factor for ClipperLib (uses integers for precision)
+    const CL_SCALE = 10000000; // Increased scale factor for ClipperLib (10 million)
 
     slicesData.forEach(sliceData => {
       const { value: slicePlaneValue, segments: rawSegments } = sliceData;
@@ -331,7 +332,7 @@ const STLViewer = ({ stlFile }) => {
         const intP1 = { X: Math.round(x1 * CL_SCALE), Y: Math.round(y1 * CL_SCALE) };
         const intP2 = { X: Math.round(x2 * CL_SCALE), Y: Math.round(y2 * CL_SCALE) };
 
-        // ClipperLib.AddPath expects a single path. We are adding each segment as a path.
+        // ClipperLib.AddPath expects a single path. Each segment is treated as a path.
         const path = new ClipperLib.Path();
         path.push(intP1);
         path.push(intP2);
@@ -339,18 +340,25 @@ const STLViewer = ({ stlFile }) => {
       });
 
       const solutionPolyTree = new ClipperLib.PolyTree();
-      // Execute a union operation on the segments to form closed contours
-      const success = clipper.Execute(
-        ClipperLib.ClipType.ctUnion,
-        solutionPolyTree,
-        ClipperLib.PolyFillType.pftNonZero,
-        ClipperLib.PolyFillType.pftNonZero
-      );
+      try {
+        const success = clipper.Execute(
+          ClipperLib.ClipType.ctUnion,
+          solutionPolyTree,
+          ClipperLib.PolyFillType.pftNonZero,
+          ClipperLib.PolyFillType.pftNonZero
+        );
 
-      if (!success) {
-        console.warn("ClipperLib Execute failed for slice at value:", slicePlaneValue);
+        if (!success) {
+          console.warn(`ClipperLib Execute failed for slice at value: ${slicePlaneValue}. Input segments:`, rawSegments);
+          // Optionally, if ClipperLib fails, you might fall back to rendering raw segments for this slice
+          // or simply skip rendering this slice. For now, it will just warn and skip.
+          return;
+        }
+      } catch (e) {
+        console.error(`ClipperLib threw an error for slice at value: ${slicePlaneValue}. Error:`, e, 'Input segments:', rawSegments);
         return;
       }
+
 
       const solutionPaths = ClipperLib.Clipper.PolyTreeToPaths(solutionPolyTree);
 
