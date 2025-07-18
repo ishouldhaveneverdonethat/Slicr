@@ -16,7 +16,7 @@ function App() {
     const formData = new FormData();
     formData.append("file", file);
 
-    const response = await fetch("https://your-backend-url.onrender.com/slice", {
+    const response = await fetch("https://slicr-1.onrender.com/", {
       method: "POST",
       body: formData,
     });
