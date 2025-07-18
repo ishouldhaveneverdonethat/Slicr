@@ -263,6 +263,9 @@ const STLViewer = ({ stlFile }) => {
 
         // Prepare data for the worker (transferable objects like Float32Array)
         // CRITICAL FIX: Create a NEW Float32Array to send a COPY of the buffer
+        // By NOT including positionArrayCopy.buffer in the transfer list,
+        // postMessage will perform a structured clone (copy) instead of a transfer.
+        // This keeps the original geometry's buffer intact on the main thread.
         const positionArrayCopy = new Float32Array(geometry.attributes.position.array);
         const bboxData = {
           min: geometry.boundingBox.min.toArray(),
@@ -278,7 +281,7 @@ const STLViewer = ({ stlFile }) => {
             currentSlice: sliceValueToRender,
             slicingPlane: debouncedSlicingParams.slicingPlane,
           }
-        }, [positionArrayCopy.buffer]); // Transfer the buffer of the COPY
+        }); // Removed the transfer list argument
       }
     }
   }, [debouncedSlicingParams, geometry, sceneState.scene]); // Depends on debounced state and geometry
