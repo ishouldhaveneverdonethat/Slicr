@@ -13,11 +13,16 @@ const STLViewer = ({ stlFile }) => {
     sliceHeight: 2,
     showSlices: true,
     currentSliceZ: 0,
-    stepThrough: false
+    stepThrough: false,
+    slicingPlane: "Z"
   });
 
   const handleSliceHeightChange = (e) => {
     setSlicingParams({ ...slicingParams, sliceHeight: parseFloat(e.target.value) });
+  };
+
+  const handlePlaneChange = (e) => {
+    setSlicingParams({ ...slicingParams, slicingPlane: e.target.value });
   };
 
   const handleToggleSlices = () => {
@@ -35,10 +40,7 @@ const STLViewer = ({ stlFile }) => {
     const lines = scene.children.filter(child => child.name === "sliceLine");
     if (lines.length === 0) return;
 
-    let svgContent = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-100 -100 200 200">
-      <g stroke="red" fill="none">
-    `;
-
+    let dxfContent = "0\nSECTION\n2\nENTITIES\n";
     lines.forEach(line => {
       const pos = line.geometry.attributes.position;
       for (let i = 0; i < pos.count; i += 2) {
@@ -46,13 +48,13 @@ const STLViewer = ({ stlFile }) => {
         const y1 = pos.getY(i).toFixed(2);
         const x2 = pos.getX(i + 1).toFixed(2);
         const y2 = pos.getY(i + 1).toFixed(2);
-        svgContent += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" />\n`;
+        dxfContent += `0\nLINE\n8\n0\n10\n${x1}\n20\n${y1}\n30\n0\n11\n${x2}\n21\n${y2}\n31\n0\n`;
       }
     });
+    dxfContent += "0\nENDSEC\n0\nEOF";
 
-    svgContent += "</g></svg>";
-    const blob = new Blob([svgContent], { type: "image/svg+xml" });
-    saveAs(blob, "slice.svg");
+    const blob = new Blob([dxfContent], { type: "application/dxf" });
+    saveAs(blob, "slice.dxf");
   };
 
   const clearSlices = (scene) => {
@@ -60,13 +62,23 @@ const STLViewer = ({ stlFile }) => {
     slices.forEach(line => scene.remove(line));
   };
 
-  const sliceSTL = (geometry, scene, heightStep = 2, currentZ = null) => {
+  const sliceSTL = (geometry, scene, heightStep = 2, currentZ = null, plane = "Z") => {
     const position = geometry.attributes.position;
     const segments = new Set();
+    const bbox = geometry.boundingBox;
 
-    const zValues = currentZ !== null ? [currentZ] : Array.from({ length: Math.floor((geometry.boundingBox.max.z - geometry.boundingBox.min.z) / heightStep) + 1 }, (_, i) => geometry.boundingBox.min.z + i * heightStep);
+    let axis, min, max;
+    if (plane === "Z") {
+      axis = "z"; min = bbox.min.z; max = bbox.max.z;
+    } else if (plane === "X") {
+      axis = "x"; min = bbox.min.x; max = bbox.max.x;
+    } else {
+      axis = "y"; min = bbox.min.y; max = bbox.max.y;
+    }
 
-    zValues.forEach(z => {
+    const values = currentZ !== null ? [currentZ] : Array.from({ length: Math.floor((max - min) / heightStep) + 1 }, (_, i) => min + i * heightStep);
+
+    values.forEach(value => {
       const points = [];
 
       for (let i = 0; i < position.count; i += 3) {
@@ -79,10 +91,11 @@ const STLViewer = ({ stlFile }) => {
           const v1 = triangle[j];
           const v2 = triangle[(j + 1) % 3];
 
-          if ((v1.z <= z && v2.z >= z) || (v2.z <= z && v1.z >= z)) {
-            const t = (z - v1.z) / (v2.z - v1.z);
+          if ((v1[axis] <= value && v2[axis] >= value) || (v2[axis] <= value && v1[axis] >= value)) {
+            const t = (value - v1[axis]) / (v2[axis] - v1[axis]);
             const x = v1.x + t * (v2.x - v1.x);
             const y = v1.y + t * (v2.y - v1.y);
+            const z = v1.z + t * (v2.z - v1.z);
             points.push(new THREE.Vector3(x, y, z));
           }
         }
@@ -159,7 +172,7 @@ const STLViewer = ({ stlFile }) => {
 
       clearSlices(scene);
       if (slicingParams.showSlices) {
-        sliceSTL(geometry, scene, slicingParams.sliceHeight, slicingParams.stepThrough ? slicingParams.currentSliceZ : null);
+        sliceSTL(geometry, scene, slicingParams.sliceHeight, slicingParams.stepThrough ? slicingParams.currentSliceZ : null, slicingParams.slicingPlane);
       }
     });
   }, [stlFile, sceneReady, slicingParams]);
@@ -186,11 +199,19 @@ const STLViewer = ({ stlFile }) => {
           Show Slices
         </label>
         <label style={{ marginLeft: 20 }}>
-          Step Through Z:
+          Plane:
+          <select value={slicingParams.slicingPlane} onChange={handlePlaneChange}>
+            <option value="Z">Z</option>
+            <option value="X">X</option>
+            <option value="Y">Y</option>
+          </select>
+        </label>
+        <label style={{ marginLeft: 20 }}>
+          Step Through:
           <input
             type="range"
-            min={geometry?.boundingBox?.min.z || 0}
-            max={geometry?.boundingBox?.max.z || 100}
+            min={geometry?.boundingBox?.min[slicingParams.slicingPlane.toLowerCase()] || 0}
+            max={geometry?.boundingBox?.max[slicingParams.slicingPlane.toLowerCase()] || 100}
             step="0.1"
             value={slicingParams.currentSliceZ}
             onChange={handleStepChange}
@@ -198,7 +219,7 @@ const STLViewer = ({ stlFile }) => {
           />
         </label>
         <button onClick={exportCurrentSlice} style={{ marginLeft: 20 }}>
-          Export SVG
+          Export DXF
         </button>
       </div>
       <div ref={mountRef} style={{ width: "100%", height: "90vh" }} />
