@@ -3,12 +3,13 @@ import * as THREE from "three";
 import { STLLoader } from "three-stdlib";
 import { OrbitControls } from "three-stdlib";
 import { saveAs } from "file-saver";
-// No direct ClipperLib import here anymore, it's in the worker
+// Import ClipperLib directly in the worker
+import * as ClipperLib from 'js-clipper';
 
-// Import the worker file
-// In Create React App, this syntax is typically handled by webpack
-// For other setups, you might need a worker-loader or similar configuration
-import SlicerWorker from '../workers/slicerWorker.js';
+// Correct way to import a Web Worker in modern bundlers (like Create React App v5+)
+// This creates a URL for the worker script which can then be instantiated.
+const SlicerWorker = new Worker(new URL('../workers/slicerWorker.js', import.meta.url));
+
 
 const STLViewer = ({ stlFile }) => {
   // --- 1. Model and Geometry State ---
@@ -27,14 +28,15 @@ const STLViewer = ({ stlFile }) => {
 
   // --- Debounce state for slicing ---
   const [debouncedSlicingParams, setDebouncedSlicingParams] = useState(slicingParams);
-  // State to hold the worker instance
-  const workerRef = useRef(null);
+  // State to hold the worker instance (now directly the instantiated worker)
+  const workerInstanceRef = useRef(null); // Renamed to avoid confusion with the Worker constructor
 
   // Initialize Web Worker
   useEffect(() => {
-    workerRef.current = new SlicerWorker();
+    // Assign the imported worker instance to the ref
+    workerInstanceRef.current = SlicerWorker;
 
-    workerRef.current.onmessage = (event) => {
+    workerInstanceRef.current.onmessage = (event) => {
       const { type, payload } = event.data;
       if (type === 'slicingComplete') {
         // Clear old slices before rendering new ones
@@ -58,15 +60,24 @@ const STLViewer = ({ stlFile }) => {
             sliceLine = new THREE.LineSegments(sliceGeometry, sliceMaterial);
           } else {
             // For Clipper contours, it's LineLoop (closed polygon)
-            // Need to ensure the loop is closed by duplicating the first point if not already
             // ClipperLib.PolyTreeToPaths usually returns closed paths, but for safety:
             const positions = sliceGeometry.attributes.position.array;
-            if (positions[0] !== positions[positions.length - 3] ||
-                positions[1] !== positions[positions.length - 2] ||
-                positions[2] !== positions[positions.length - 1]) {
+            // Check if the first and last points are identical (within float precision)
+            const firstPointX = positions[0];
+            const firstPointY = positions[1];
+            const firstPointZ = positions[2];
+            const lastPointX = positions[positions.length - 3];
+            const lastPointY = positions[positions.length - 2];
+            const lastPointZ = positions[positions.length - 1];
+
+            const arePointsIdentical = Math.abs(firstPointX - lastPointX) < 1e-6 &&
+                                       Math.abs(firstPointY - lastPointY) < 1e-6 &&
+                                       Math.abs(firstPointZ - lastPointZ) < 1e-6;
+
+            if (!arePointsIdentical) {
                 const closedPositions = new Float32Array(positions.length + 3);
                 closedPositions.set(positions);
-                closedPositions.set([positions[0], positions[1], positions[2]], positions.length);
+                closedPositions.set([firstPointX, firstPointY, firstPointZ], positions.length);
                 sliceGeometry.setAttribute('position', new THREE.Float32BufferAttribute(closedPositions, 3));
             }
             sliceLine = new THREE.LineLoop(sliceGeometry, sliceMaterial);
@@ -78,12 +89,14 @@ const STLViewer = ({ stlFile }) => {
       }
     };
 
-    return () => {
-      if (workerRef.current) {
-        workerRef.current.terminate(); // Terminate worker on component unmount
-      }
-    };
+    // No need to terminate here as the worker is a singleton created outside the component
+    // If you wanted a new worker instance per component mount, you'd create `new Worker(...)` here
+    // and return `workerInstanceRef.current.terminate()` in the cleanup.
+    // For performance, a single shared worker is often better for this kind of task.
+    // However, if the worker needs to be reset or if multiple instances are needed,
+    // you would manage its lifecycle within this useEffect.
   }, [sceneState.scene]); // Dependency on sceneState.scene to ensure worker is ready
+
 
   // Custom debounce hook
   useEffect(() => {
@@ -240,7 +253,7 @@ const STLViewer = ({ stlFile }) => {
 
   // --- Send slicing request to worker when debounced params or geometry change ---
   useEffect(() => {
-    if (geometry && sceneState.scene && workerRef.current) {
+    if (geometry && sceneState.scene && workerInstanceRef.current) {
       clearSlices(sceneState.scene); // Clear old slices immediately
       if (debouncedSlicingParams.showSlices) {
         let sliceValueToRender = null;
@@ -255,7 +268,7 @@ const STLViewer = ({ stlFile }) => {
           max: geometry.boundingBox.max.toArray(),
         };
 
-        workerRef.current.postMessage({
+        workerInstanceRef.current.postMessage({
           type: 'sliceModel',
           payload: {
             positionArray: positionArray,
@@ -344,8 +357,6 @@ ${svgPaths}
       const pos = line.geometry.attributes.position;
       const numPoints = pos.count; // Total number of points in the buffer
 
-      // If it's a LineLoop, iterate all points and connect last to first.
-      // If it's LineSegments (fallback), iterate in pairs.
       for (let i = 0; i < numPoints; i++) {
         const p1x = pos.getX(i);
         const p1y = pos.getY(i);
@@ -354,13 +365,9 @@ ${svgPaths}
         let nextIndex;
         if (line instanceof THREE.LineLoop) {
           nextIndex = (i + 1) % numPoints;
-        } else { // LineSegments
-          // For LineSegments, points are already in pairs (p1, p2), (p3, p4), etc.
-          // We only need to process each pair once.
-          if (i % 2 !== 0) continue; // Skip odd indices as they are the 'next' point of a pair
-
+        } else {
+          if (i % 2 !== 0) continue;
           nextIndex = i + 1;
-          // Ensure nextIndex is within bounds for LineSegments
           if (nextIndex >= numPoints) continue;
         }
         
