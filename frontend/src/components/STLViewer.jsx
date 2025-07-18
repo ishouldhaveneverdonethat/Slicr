@@ -439,8 +439,8 @@ ${svgPaths}
           Slice Height:
           <input
             type="number"
-            step="0.1"
-            min="0.1"
+            step="1"
+            min="1"
             value={slicingParams.sliceHeight}
             onChange={handleSliceHeightChange}
             style={{ marginLeft: 5, width: 60, padding: 3 }}
@@ -482,7 +482,7 @@ ${svgPaths}
             type="range"
             min={minRangeValue}
             max={maxRangeValue}
-            step="0.1"
+            step="1"
             value={slicingParams.currentSlice}
             onChange={handleStepChange}
             disabled={!geometry || !slicingParams.singleSliceMode}
