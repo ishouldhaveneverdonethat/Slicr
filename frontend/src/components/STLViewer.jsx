@@ -125,7 +125,7 @@ const STLViewer = ({ stlFile }) => {
 
   const handleStepChange = useCallback((e) => {
     // Defensive check: ensure geometry and currentScale are ready before calculations
-    if (!geometry || !Number.isFinite(currentScale.x) || !Number.isFinite(currentScale.y) || !Number.isFinite(currentScale.z)) {
+    if (!geometry || !geometry.boundingBox || !Number.isFinite(currentScale.x) || !Number.isFinite(currentScale.y) || !Number.isFinite(currentScale.z)) {
       return; // Prevent calculations if essential data is not ready
     }
 
@@ -481,8 +481,9 @@ const STLViewer = ({ stlFile }) => {
   };
 
   const getScaledMinRangeValue = (geom, plane, scaleX, scaleY, scaleZ) => {
-    if (!geom || !geom.boundingBox) return 0;
+    if (!geom || !geom.boundingBox || !geom.boundingBox.min || !Number.isFinite(scaleX) || !Number.isFinite(scaleY) || !Number.isFinite(scaleZ)) return 0;
     const minVal = geom.boundingBox.min[plane.toLowerCase()];
+    if (!Number.isFinite(minVal)) return 0;
     if (plane === 'X') return minVal * scaleX;
     if (plane === 'Y') return minVal * scaleY;
     if (plane === 'Z') return minVal * scaleZ;
@@ -490,8 +491,9 @@ const STLViewer = ({ stlFile }) => {
   };
 
   const getScaledMaxRangeValue = (geom, plane, scaleX, scaleY, scaleZ) => {
-    if (!geom || !geom.boundingBox) return 100;
+    if (!geom || !geom.boundingBox || !geom.boundingBox.max || !Number.isFinite(scaleX) || !Number.isFinite(scaleY) || !Number.isFinite(scaleZ)) return 100;
     const maxVal = geom.boundingBox.max[plane.toLowerCase()];
+    if (!Number.isFinite(maxVal)) return 100;
     if (plane === 'X') return maxVal * scaleX;
     if (plane === 'Y') return maxVal * scaleY;
     if (plane === 'Z') return maxVal * scaleZ;
@@ -778,7 +780,7 @@ ${svgPaths}
             step="1"
             value={currentLayerIndex}
             onChange={handleStepChange}
-            disabled={!geometry || !slicingParams.singleSliceMode || totalLayers <= 1 || showMiddleSlice}
+            disabled={!geometry || !geometry.boundingBox || !slicingParams.singleSliceMode || totalLayers <= 1 || showMiddleSlice}
             style={{ marginLeft: 5, width: 150 }}
           />
           <span style={{ marginLeft: 5 }}>{slicingParams.currentSliceValue.toFixed(2)}</span>
