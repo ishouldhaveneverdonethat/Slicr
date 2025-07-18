@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import STLViewer from "./STLViewer";
+import STLViewer from "./components/STLViewer";
 
 export default function App() {
   const [stlFileUrl, setStlFileUrl] = useState(null);
