@@ -1,25 +1,25 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef } from "react";
 import * as THREE from "three";
 import { STLLoader } from "three-stdlib";
 import { OrbitControls } from "three-stdlib";
 
 const STLViewer = ({ stlFile }) => {
   const mountRef = useRef(null);
-  const sceneRef = useRef(null);
-  const cameraRef = useRef(null);
-  const rendererRef = useRef(null);
-  const controlsRef = useRef(null);
-  const meshRef = useRef(null);
+  const sceneRef = useRef();
+  const cameraRef = useRef();
+  const rendererRef = useRef();
+  const controlsRef = useRef();
+  const meshRef = useRef();
 
   useEffect(() => {
     const mount = mountRef.current;
 
-    // Scene setup
+    // Scene
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x121212);
     sceneRef.current = scene;
 
-    // Camera setup
+    // Camera
     const camera = new THREE.PerspectiveCamera(
       75,
       mount.clientWidth / mount.clientHeight,
@@ -29,14 +29,15 @@ const STLViewer = ({ stlFile }) => {
     camera.position.set(0, 0, 100);
     cameraRef.current = camera;
 
-    // Renderer setup
+    // Renderer
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     mount.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
     // Controls
-    controlsRef.current = new OrbitControls(camera, renderer.domElement);
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controlsRef.current = controls;
 
     // Lighting
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
@@ -48,7 +49,7 @@ const STLViewer = ({ stlFile }) => {
     // Animate
     const animate = () => {
       requestAnimationFrame(animate);
-      controlsRef.current.update();
+      controls.update();
       renderer.render(scene, camera);
     };
     animate();
@@ -71,6 +72,7 @@ const STLViewer = ({ stlFile }) => {
       geometry.boundingBox.getCenter(center);
       mesh.position.sub(center); // center the mesh
 
+      // Remove old mesh if exists
       if (meshRef.current) {
         sceneRef.current.remove(meshRef.current);
       }
