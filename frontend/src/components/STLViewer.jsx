@@ -309,6 +309,12 @@ const STLViewer = ({ stlFile }) => {
     slicesData.forEach(sliceData => {
       const { value: slicePlaneValue, segments: rawSegments } = sliceData;
 
+      // If no raw segments for this slice, skip processing with ClipperLib
+      if (rawSegments.length === 0) {
+        // console.log(`Skipping ClipperLib for slice at value: ${slicePlaneValue} (no raw segments).`);
+        return;
+      }
+
       const clipper = new ClipperLib.Clipper();
       const subjectPaths = new ClipperLib.Paths();
 
@@ -332,7 +338,7 @@ const STLViewer = ({ stlFile }) => {
         const intP1 = { X: Math.round(x1 * CL_SCALE), Y: Math.round(y1 * CL_SCALE) };
         const intP2 = { X: Math.round(x2 * CL_SCALE), Y: Math.round(y2 * CL_SCALE) };
 
-        // ClipperLib.AddPath expects a single path. Each segment is treated as a path.
+        // Add each segment as a path to ClipperLib
         const path = new ClipperLib.Path();
         path.push(intP1);
         path.push(intP2);
@@ -340,22 +346,37 @@ const STLViewer = ({ stlFile }) => {
       });
 
       const solutionPolyTree = new ClipperLib.PolyTree();
+      let clipperSuccess = false;
       try {
-        const success = clipper.Execute(
+        clipperSuccess = clipper.Execute(
           ClipperLib.ClipType.ctUnion,
           solutionPolyTree,
           ClipperLib.PolyFillType.pftNonZero,
           ClipperLib.PolyFillType.pftNonZero
         );
 
-        if (!success) {
-          console.warn(`ClipperLib Execute failed for slice at value: ${slicePlaneValue}. Input segments:`, rawSegments);
-          // Optionally, if ClipperLib fails, you might fall back to rendering raw segments for this slice
-          // or simply skip rendering this slice. For now, it will just warn and skip.
+        if (!clipperSuccess) {
+          console.warn(`ClipperLib Execute failed for slice at value: ${slicePlaneValue}. Falling back to raw segments.`);
+          // Fallback: render raw segments if ClipperLib fails
+          rawSegments.forEach(segment => {
+            const segmentGeometry = new THREE.BufferGeometry().setFromPoints(segment);
+            const segmentMaterial = new THREE.LineBasicMaterial({ color: 0x00ff00 }); // Green for fallback
+            const line = new THREE.LineSegments(segmentGeometry, segmentMaterial);
+            line.name = "sliceLine";
+            scene.add(line);
+          });
           return;
         }
       } catch (e) {
-        console.error(`ClipperLib threw an error for slice at value: ${slicePlaneValue}. Error:`, e, 'Input segments:', rawSegments);
+        console.error(`ClipperLib threw an error for slice at value: ${slicePlaneValue}. Error:`, e, 'Falling back to raw segments.');
+        // Fallback: render raw segments if ClipperLib throws
+        rawSegments.forEach(segment => {
+          const segmentGeometry = new THREE.BufferGeometry().setFromPoints(segment);
+          const segmentMaterial = new THREE.LineBasicMaterial({ color: 0x00ff00 }); // Green for fallback
+          const line = new THREE.LineSegments(segmentGeometry, segmentMaterial);
+          line.name = "sliceLine";
+          scene.add(line);
+        });
         return;
       }
 
@@ -383,7 +404,7 @@ const STLViewer = ({ stlFile }) => {
 
         if (threeJsPoints.length > 1) {
           const sliceGeometry = new THREE.BufferGeometry().setFromPoints(threeJsPoints.concat(threeJsPoints[0]));
-          const sliceMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 });
+          const sliceMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 }); // Red for Clipper-generated contours
           const sliceLine = new THREE.LineLoop(sliceGeometry, sliceMaterial);
           sliceLine.name = "sliceLine";
           scene.add(sliceLine);
@@ -428,9 +449,15 @@ const STLViewer = ({ stlFile }) => {
 
         pathD += i === 0 ? `M ${px.toFixed(3)} ${(-py).toFixed(3)}` : ` L ${px.toFixed(3)} ${(-py).toFixed(3)}`;
       }
-      pathD += " Z";
+      // Only close path if it's a LineLoop (Clipper output)
+      // LineSegments (fallback) don't form closed paths naturally
+      if (line instanceof THREE.LineLoop) {
+        pathD += " Z";
+      }
 
-      svgPaths += `<path d="${pathD}" stroke="red" stroke-width="0.05" fill="none"/>`;
+      // Use line's material color for SVG stroke
+      const strokeColor = `#${line.material.color.getHexString()}`;
+      svgPaths += `<path d="${pathD}" stroke="${strokeColor}" stroke-width="0.05" fill="none"/>`;
     });
 
     const viewBoxString = `${minX.toFixed(3)} ${(-maxY).toFixed(3)} ${(maxX - minX).toFixed(3)} ${(maxY - minY).toFixed(3)}`;
@@ -452,12 +479,26 @@ ${svgPaths}
     let dxfContent = "0\nSECTION\n2\nENTITIES\n";
     lines.forEach((line) => {
       const pos = line.geometry.attributes.position;
-      for (let i = 0; i < pos.count; i++) {
+      // For LineSegments, iterate pairs; for LineLoop, iterate all and connect last to first
+      const numSegments = line instanceof THREE.LineLoop ? pos.count : pos.count / 2;
+
+      for (let i = 0; i < numSegments; i++) {
         const p1x = pos.getX(i);
         const p1y = pos.getY(i);
         const p1z = pos.getZ(i);
 
-        const nextIndex = (i + 1) % pos.count;
+        let nextIndex;
+        if (line instanceof THREE.LineLoop) {
+          nextIndex = (i + 1) % pos.count;
+        } else { // LineSegments
+          nextIndex = i * 2 + 1; // For raw segments, points are [p1, p2, p3, p4...]
+          if (i % 2 === 0) { // If it's the start of a segment pair
+            nextIndex = i + 1;
+          } else { // If it's the end of a segment pair
+            continue; // Skip, as we handle pairs
+          }
+        }
+        
         const p2x = pos.getX(nextIndex);
         const p2y = pos.getY(nextIndex);
         const p2z = pos.getZ(nextIndex);
