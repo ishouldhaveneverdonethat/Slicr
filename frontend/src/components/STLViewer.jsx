@@ -225,7 +225,12 @@ const STLViewer = ({ stlFile }) => {
       loadedGeometry.computeBoundingBox();
       setGeometry(loadedGeometry);
 
-      const material = new THREE.MeshPhongMaterial({ color: 0x00aaff });
+      // Changed material to be fully opaque
+      const material = new THREE.MeshPhongMaterial({
+        color: 0x00aaff,
+        transparent: false, // Ensure not transparent
+        opacity: 1,         // Ensure full opacity
+      });
       const mesh = new THREE.Mesh(loadedGeometry, material);
 
       const center = new THREE.Vector3();
