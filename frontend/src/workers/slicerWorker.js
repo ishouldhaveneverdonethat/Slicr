@@ -5,7 +5,7 @@ import * as THREE from 'three';
 
 const CL_SCALE = 10000000; // Scale factor for ClipperLib (10 million)
 const EPSILON = 1e-5; // Epsilon for filtering very small segments (e.g., zero length)
-const SNAP_TOLERANCE = 0.0001; // Tolerance for snapping points, e.g., 0.0001mm (0.1 microns)
+const SNAP_TOLERANCE = 0.05; // Tolerance for snapping points, e.g., 0.0001mm (0.1 microns)
 
 /**
  * getSliceSegments (Worker-side)
