@@ -18,6 +18,7 @@ const STLViewer = ({ stlFile }) => {
     currentSlice: 0,
     singleSliceMode: false, // Renamed for clarity and explicitly managed
     slicingPlane: "Z",
+    slicingDisplayMode: 'rawSegments', // 'rawSegments' or 'angleSortedContours'
   });
 
   // --- 4. UI Controls Handlers ---
@@ -58,6 +59,10 @@ const STLViewer = ({ stlFile }) => {
       // When turning off single slice mode, it will naturally revert to showing all slices
       // based on sliceHeight due to the useEffect dependency.
     }));
+  };
+
+  const handleDisplayModeChange = (e) => {
+    setSlicingParams((p) => ({ ...p, slicingDisplayMode: e.target.value }));
   };
 
 
@@ -174,13 +179,14 @@ const STLViewer = ({ stlFile }) => {
          if (slicingParams.singleSliceMode) {
            sliceValueToRender = slicingParams.currentSlice;
          }
-         sliceSTL(
+         // Call getSliceSegments, then render based on display mode
+         const segments = getSliceSegments(
            loadedGeometry,
-           scene,
            slicingParams.sliceHeight,
            sliceValueToRender,
            slicingParams.slicingPlane
          );
+         renderSlices(segments, scene, slicingParams.slicingDisplayMode, slicingParams.slicingPlane);
       }
     },
     undefined, // onProgress callback - can be used for loading indicators
@@ -188,7 +194,7 @@ const STLViewer = ({ stlFile }) => {
       console.error("Error loading STL file:", error);
       alert("Error loading STL file. Please check the file and try again.");
     });
-  }, [stlFile, sceneState.scene, sceneState.camera, sceneState.controls, slicingParams.singleSliceMode, slicingParams.currentSlice, slicingParams.sliceHeight, slicingParams.slicingPlane, slicingParams.showSlices]); // Added more dependencies here to ensure consistent behavior
+  }, [stlFile, sceneState.scene, sceneState.camera, sceneState.controls, slicingParams.singleSliceMode, slicingParams.currentSlice, slicingParams.sliceHeight, slicingParams.slicingPlane, slicingParams.showSlices, slicingParams.slicingDisplayMode]); // Added new dependency
 
   // --- Re-slice when slicingParams change (if geometry exists) ---
   useEffect(() => {
@@ -199,16 +205,17 @@ const STLViewer = ({ stlFile }) => {
         if (slicingParams.singleSliceMode) {
           sliceValueToRender = slicingParams.currentSlice;
         }
-        sliceSTL(
+        // Call getSliceSegments, then render based on display mode
+        const segments = getSliceSegments(
           geometry,
-          sceneState.scene,
           slicingParams.sliceHeight,
-          sliceValueToRender, // Pass the determined slice value
+          sliceValueToRender,
           slicingParams.slicingPlane
         );
+        renderSlices(segments, sceneState.scene, slicingParams.slicingDisplayMode, slicingParams.slicingPlane);
       }
     }
-  }, [slicingParams.sliceHeight, slicingParams.showSlices, slicingParams.currentSlice, slicingParams.singleSliceMode, slicingParams.slicingPlane, geometry, sceneState.scene]);
+  }, [slicingParams.sliceHeight, slicingParams.showSlices, slicingParams.currentSlice, slicingParams.singleSliceMode, slicingParams.slicingPlane, slicingParams.slicingDisplayMode, geometry, sceneState.scene]); // Added new dependency
 
   // --- 6. Utility Functions ---
   const clearSlices = (scene) => {
@@ -221,19 +228,27 @@ const STLViewer = ({ stlFile }) => {
     });
   };
 
-  // --- 3. Slicing Logic (The core area that needs robust improvement) ---
-  const sliceSTL = (geometry, scene, heightStep, currentSliceVal, plane) => {
+  /**
+   * getSliceSegments
+   * Extracts raw intersection points (segments) for each slice plane.
+   * This function focuses only on finding the intersections, not on contour reconstruction.
+   * @param {THREE.BufferGeometry} geometry The geometry to slice.
+   * @param {number} heightStep The height between slices.
+   * @param {number | null} currentSliceVal If not null, only slice at this specific value.
+   * @param {'X' | 'Y' | 'Z'} plane The slicing plane (e.g., 'Z' for XY slices).
+   * @returns {Array<Array<THREE.Vector3>>} An array of arrays, where each inner array is [point1, point2] forming a segment.
+   */
+  const getSliceSegments = (geometry, heightStep, currentSliceVal, plane) => {
     const pos = geometry.attributes.position;
     const bbox = geometry.boundingBox;
+    const allSliceSegments = []; // Will store segments for all slices
 
     if (!bbox) {
       console.warn("Bounding box not computed for geometry. Cannot slice.");
-      return;
+      return allSliceSegments;
     }
 
     let axis;
-    // Ensure axis mapping is correct for BufferAttribute access
-    // let axisIndex; // Not directly used in this part of the logic
     let min, max;
     if (plane === "Z") {
       axis = "z";
@@ -249,22 +264,19 @@ const STLViewer = ({ stlFile }) => {
       max = bbox.max.y;
     }
 
-    // Determine slice values
     const valuesToSlice =
-      currentSliceVal !== null // If currentSliceVal is provided (single slice mode)
-        ? [currentSliceVal] // Only slice at that specific value
-        : Array.from({ length: Math.floor((max - min) / heightStep) + 1 }, (_, i) => min + i * heightStep); // Otherwise, generate multiple slices
+      currentSliceVal !== null
+        ? [currentSliceVal]
+        : Array.from({ length: Math.floor((max - min) / heightStep) + 1 }, (_, i) => min + i * heightStep);
 
-    // Temporary vectors to avoid repeated allocations in loop
     const p1 = new THREE.Vector3();
     const p2 = new THREE.Vector3();
     const p3 = new THREE.Vector3();
 
     valuesToSlice.forEach((value) => {
-      const intersectionPointsForThisSlice = []; // Points found for the current slice plane
+      const segmentsForCurrentSlice = []; // Segments for this specific slice plane
 
       for (let i = 0; i < pos.count; i += 3) {
-        // Read triangle vertices
         p1.fromBufferAttribute(pos, i);
         p2.fromBufferAttribute(pos, i + 1);
         p3.fromBufferAttribute(pos, i + 2);
@@ -276,61 +288,67 @@ const STLViewer = ({ stlFile }) => {
           const v1 = triangle[j];
           const v2 = triangle[(j + 1) % 3];
 
-          // Check if segment (v1, v2) crosses the plane 'value' along 'axis'
-          // Using a small epsilon to handle floating point comparisons near the plane
-          const epsilon = 1e-6; // A small tolerance
+          const epsilon = 1e-6;
           const val1 = v1[axis];
           const val2 = v2[axis];
 
-          // Determine if intersection occurs
           if (
             (val1 <= value + epsilon && val2 >= value - epsilon) ||
             (val2 <= value + epsilon && val1 >= value - epsilon)
           ) {
-            // Avoid division by zero for horizontal/co-planar edges
             if (Math.abs(val2 - val1) < epsilon) {
               continue;
             }
 
-            // Calculate intersection point
             const t = (value - val1) / (val2 - val1);
             const intersectPoint = new THREE.Vector3().lerpVectors(v1, v2, t);
             currentTriangleIntersectionPoints.push(intersectPoint);
           }
         }
 
-        // A slice plane will intersect a triangle in either 0 or 2 points (forming a line segment)
-        // or 1 point (if it passes through a vertex), or 3 points (if co-planar).
         if (currentTriangleIntersectionPoints.length === 2) {
-          // If we found two intersection points for this triangle, they form a segment on the slice plane.
-          intersectionPointsForThisSlice.push(currentTriangleIntersectionPoints[0], currentTriangleIntersectionPoints[1]);
+          // Store the two points that form a segment
+          segmentsForCurrentSlice.push(currentTriangleIntersectionPoints);
         }
       }
+      allSliceSegments.push(...segmentsForCurrentSlice); // Add segments of current slice to overall list
+    });
+    return allSliceSegments;
+  };
 
-      // --- THIS IS THE CRITICAL SECTION FOR "GARBLED" SLICES ---
-      // The `intersectionPointsForThisSlice` array now contains pairs of points from *all*
-      // triangles that intersect the current slice plane.
-      // Your current sorting approach (angle around centroid) works only for simple, convex,
-      // single-contour slices. It will fail for:
-      // - Models with holes
-      // - Models that produce multiple disconnected contours on a single slice (e.g., a "U" shape sliced in the middle)
-      // - Self-intersecting contours
+  /**
+   * renderSlices
+   * Renders the slice segments based on the chosen display mode.
+   * @param {Array<Array<THREE.Vector3>>} segments An array of segments, each segment is [point1, point2].
+   * @param {THREE.Scene} scene The Three.js scene to add lines to.
+   * @param {'rawSegments' | 'angleSortedContours'} displayMode The mode to render slices.
+   * @param {'X' | 'Y' | 'Z'} plane The slicing plane, used for angle sorting projection.
+   */
+  const renderSlices = (segments, scene, displayMode, plane) => {
+    if (displayMode === 'rawSegments') {
+      segments.forEach(segment => {
+        const segmentGeometry = new THREE.BufferGeometry().setFromPoints(segment);
+        const segmentMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 });
+        const line = new THREE.LineSegments(segmentGeometry, segmentMaterial);
+        line.name = "sliceLine";
+        scene.add(line);
+      });
+    } else { // 'angleSortedContours' mode (attempts to form contours)
+      // This part still uses the angle sort and will produce "garbled" results for complex shapes.
+      // It's here to demonstrate the difference and the limitations of this approach.
 
-      // For a robust solution, you need to:
-      // 1. Convert the pairs of points (segments) into a data structure that allows easy traversal (e.g., an adjacency list).
-      // 2. Traverse this structure to find all distinct, closed loops (contours).
-      // 3. Handle nesting (inner vs. outer loops for holes).
-      // This typically requires a 2D computational geometry library (like js-clipper) or a much more complex custom algorithm.
+      // Collect all points from all segments for this (single or multiple) slice(s)
+      const allPointsForContouring = [];
+      segments.forEach(segment => {
+        allPointsForContouring.push(segment[0], segment[1]);
+      });
 
-      if (intersectionPointsForThisSlice.length > 1) {
-        // --- START: Simple Angle Sort (Produces Garbled Results for Complex Shapes) ---
-        const centroid = intersectionPointsForThisSlice
+      if (allPointsForContouring.length > 1) {
+        const centroid = allPointsForContouring
           .reduce((acc, p) => acc.add(p.clone()), new THREE.Vector3())
-          .divideScalar(intersectionPointsForThisSlice.length);
+          .divideScalar(allPointsForContouring.length);
 
-        // Sort points by angle around centroid on the relevant plane
-        // Project to 2D for sorting to ensure correct angle calculation regardless of slicing plane
-        intersectionPointsForThisSlice.sort((a, b) => {
+        allPointsForContouring.sort((a, b) => {
           let angleA, angleB;
           if (plane === "Z") { // Project to XY plane
             angleA = Math.atan2(a.y - centroid.y, a.x - centroid.x);
@@ -346,25 +364,16 @@ const STLViewer = ({ stlFile }) => {
         });
 
         const sliceGeometry = new THREE.BufferGeometry().setFromPoints(
-          intersectionPointsForThisSlice.concat(intersectionPointsForThisSlice[0]) // Close the loop
+          allPointsForContouring.concat(allPointsForContouring[0]) // Close the loop
         );
         const sliceMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 });
         const sliceLine = new THREE.LineLoop(sliceGeometry, sliceMaterial);
         sliceLine.name = "sliceLine";
         scene.add(sliceLine);
-        // --- END: Simple Angle Sort ---
-
-        // --- PLACEHOLDER FOR ROBUST CONTOUR RECONSTRUCTION ---
-        // A truly robust solution would go here, replacing the angle sort above.
-        // It would involve:
-        // 1. Creating a list of 2D line segments from `intersectionPointsForThisSlice`.
-        // 2. Using a library like js-clipper to perform polygon union/reconstruction on these segments.
-        // 3. Iterating through the resulting closed 2D polygons from the library.
-        // 4. For each 2D polygon, convert its points back to 3D at the current `value` (sliceZ/sliceY/sliceX).
-        // 5. Create a `THREE.LineLoop` for each *correctly reconstructed* contour and add to scene.
       }
-    });
+    }
   };
+
 
   // --- 5. Export Functions ---
   const exportSVG = () => {
@@ -481,6 +490,7 @@ ${svgPaths}
   // Calculate total layers and current layer index for display
   let totalLayers = 0;
   let currentLayerIndex = 0;
+  let modelDimensions = { x: 0, y: 0, z: 0 }; // For displaying dimensions
 
   if (geometry && geometry.boundingBox && slicingParams.sliceHeight > 0) {
     const range = maxRangeValue - minRangeValue;
@@ -492,6 +502,15 @@ ${svgPaths}
     currentLayerIndex = Math.floor((clampedCurrentSlice - minRangeValue) / slicingParams.sliceHeight);
     // Ensure index is within bounds [0, totalLayers - 1]
     currentLayerIndex = Math.max(0, Math.min(totalLayers - 1, currentLayerIndex));
+
+    // Calculate model dimensions
+    const size = new THREE.Vector3();
+    geometry.boundingBox.getSize(size);
+    modelDimensions = {
+      x: size.x.toFixed(2),
+      y: size.y.toFixed(2),
+      z: size.z.toFixed(2),
+    };
   }
 
   // --- UI Render ---
@@ -554,10 +573,24 @@ ${svgPaths}
           <span style={{ marginLeft: 5 }}>{slicingParams.currentSlice.toFixed(2)}</span>
         </label>
 
-        {geometry && ( // Only show layer info if a geometry is loaded
-          <span style={{ marginLeft: 20, fontSize: '0.9em' }}>
-            Total Layers: {totalLayers} | Current Layer: {currentLayerIndex + 1}
-          </span>
+        <label style={{ marginLeft: 20 }}>
+          Display Mode:
+          <select value={slicingParams.slicingDisplayMode} onChange={handleDisplayModeChange} style={{ marginLeft: 5, padding: 3 }}>
+            <option value="rawSegments">Raw Segments</option>
+            <option value="angleSortedContours">Angle Sorted Contours (may be garbled)</option>
+          </select>
+        </label>
+
+
+        {geometry && ( // Only show layer and dimension info if a geometry is loaded
+          <>
+            <span style={{ marginLeft: 20, fontSize: '0.9em' }}>
+              Total Layers: {totalLayers} | Current Layer: {currentLayerIndex + 1}
+            </span>
+            <span style={{ marginLeft: 20, fontSize: '0.9em' }}>
+              Dimensions (mm): L {modelDimensions.x} W {modelDimensions.y} H {modelDimensions.z}
+            </span>
+          </>
         )}
 
         <button onClick={exportSVG} style={{ marginLeft: 20, padding: '5px 10px', cursor: 'pointer' }}>
