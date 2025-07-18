@@ -26,9 +26,7 @@ const STLViewer = ({ stlFile }) => {
     currentSliceValue: 0, // Actual coordinate value
     singleSliceMode: false,
     slicingPlane: "Z",
-    scaleX: 1, // Will be updated dynamically based on targetDimensions
-    scaleY: 1, // Will be updated dynamically based on targetDimensions
-    scaleZ: 1, // Will be updated dynamically based on targetDimensions
+    // scaleX, scaleY, scaleZ are now derived from currentScale in the useEffect
   });
 
   // --- New state for controlling model outline visibility ---
@@ -184,13 +182,48 @@ const STLViewer = ({ stlFile }) => {
     }));
   };
 
-  // New: Handlers for target dimension changes
+  // New: Handlers for target dimension changes with proportional scaling
   const handleTargetDimensionChange = (dimension) => (e) => {
-    const value = parseFloat(e.target.value);
-    setTargetDimensions(prev => ({
-      ...prev,
-      [dimension]: isNaN(value) ? 0 : value, // Default to 0 if invalid input
-    }));
+    const inputValue = parseFloat(e.target.value);
+    if (isNaN(inputValue) || inputValue <= 0) {
+      // Optionally reset to original or prevent update if invalid
+      // For proportional scaling, if input is invalid, it's better to revert to current
+      // or simply not update, to avoid breaking aspect ratio with 0 or NaN.
+      console.warn(`Invalid input for ${dimension}: ${e.target.value}. Value must be a positive number.`);
+      return;
+    }
+
+    let scaleFactor = 1;
+
+    // Calculate scale factor based on the changed dimension
+    if (dimension === 'width' && originalDimensions.x > 0) {
+      scaleFactor = inputValue / originalDimensions.x;
+    } else if (dimension === 'height' && originalDimensions.y > 0) {
+      scaleFactor = inputValue / originalDimensions.y;
+    } else if (dimension === 'depth' && originalDimensions.z > 0) {
+      scaleFactor = inputValue / originalDimensions.z;
+    } else {
+        // This case should ideally not happen if originalDimensions are always > 0
+        console.warn(`Original dimension for ${dimension} is zero. Cannot scale proportionally.`);
+        // If original dimension is zero, we can't calculate a proportional scale.
+        // Just set the target dimension directly for the changed axis.
+        setTargetDimensions(prev => ({
+            ...prev,
+            [dimension]: inputValue
+        }));
+        return;
+    }
+
+    // Apply the calculated scaleFactor to all dimensions based on original dimensions
+    const newTargetWidth = originalDimensions.x * scaleFactor;
+    const newTargetHeight = originalDimensions.y * scaleFactor;
+    const newTargetDepth = originalDimensions.z * scaleFactor;
+
+    setTargetDimensions({
+      width: newTargetWidth,
+      height: newTargetHeight,
+      depth: newTargetDepth,
+    });
   };
 
 
@@ -326,6 +359,8 @@ const STLViewer = ({ stlFile }) => {
   useEffect(() => {
     if (!geometry || !sceneState.scene || originalDimensions.x === 0 || originalDimensions.y === 0 || originalDimensions.z === 0) {
       // If original dimensions are zero, or geometry/scene not ready, cannot calculate scale
+      // Also, if original dimensions are 0, we can't calculate a valid scale factor for proportional scaling.
+      // This might happen if the STL file is invalid or has degenerate geometry.
       return;
     }
 
@@ -334,13 +369,15 @@ const STLViewer = ({ stlFile }) => {
 
     let newScaleX = 1, newScaleY = 1, newScaleZ = 1;
 
-    if (targetDimensions.width > 0) {
+    // Calculate scales based on target dimensions relative to original dimensions
+    // Handle cases where original dimension might be 0 to prevent division by zero
+    if (originalDimensions.x > 0 && targetDimensions.width > 0) {
       newScaleX = targetDimensions.width / originalDimensions.x;
     }
-    if (targetDimensions.height > 0) {
+    if (originalDimensions.y > 0 && targetDimensions.height > 0) {
       newScaleY = targetDimensions.height / originalDimensions.y;
     }
-    if (targetDimensions.depth > 0) {
+    if (originalDimensions.z > 0 && targetDimensions.depth > 0) {
       newScaleZ = targetDimensions.depth / originalDimensions.z;
     }
 
@@ -434,7 +471,7 @@ const STLViewer = ({ stlFile }) => {
         });
       }
     }
-  }, [debouncedSlicingParams, geometry, sceneState.scene, showMiddleSlice, currentScale]); // Add currentScale to dependencies
+  }, [debouncedSlicingParams, geometry, sceneState.scene, showMiddleSlice, currentScale]);
 
 
   // --- 6. Utility Functions ---
