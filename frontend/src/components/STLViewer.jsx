@@ -27,6 +27,8 @@ const STLViewer = ({ stlFile }) => {
 
   // --- New state for controlling model outline visibility ---
   const [showModelOutline, setShowModelOutline] = useState(true); // Default to true
+  // --- New state for showing middle slice ---
+  const [showMiddleSlice, setShowMiddleSlice] = useState(false); // Default to false
 
   // --- Debounce state for slicing ---
   const [debouncedSlicingParams, setDebouncedSlicingParams] = useState(slicingParams);
@@ -120,6 +122,7 @@ const STLViewer = ({ stlFile }) => {
       singleSliceMode: false,
       currentLayerIndex: 0, // Reset layer index when height changes
     }));
+    setShowMiddleSlice(false); // Disable middle slice when height changes
   };
 
   const handlePlaneChange = (e) => {
@@ -129,6 +132,7 @@ const STLViewer = ({ stlFile }) => {
       singleSliceMode: false,
       currentLayerIndex: 0, // Reset layer index when plane changes
     }));
+    setShowMiddleSlice(false); // Disable middle slice when plane changes
   };
 
   const handleToggleSlices = () => {
@@ -147,6 +151,7 @@ const STLViewer = ({ stlFile }) => {
       singleSliceMode: true,
       showSlices: true,
     }));
+    setShowMiddleSlice(false); // Disable middle slice when manual slice is adjusted
   };
 
   const handleToggleSingleSliceMode = () => {
@@ -154,11 +159,23 @@ const STLViewer = ({ stlFile }) => {
       ...p,
       singleSliceMode: !p.singleSliceMode,
     }));
+    setShowMiddleSlice(false); // Disable middle slice when toggling single slice mode
   };
 
   // Handler for model outline visibility
   const handleToggleModelOutline = () => {
     setShowModelOutline(prev => !prev);
+  };
+
+  // Handler for middle slice visibility
+  const handleToggleMiddleSlice = () => {
+    setShowMiddleSlice(prev => !prev);
+    // When middle slice is toggled, disable single slice mode and show all slices
+    setSlicingParams(prev => ({
+      ...prev,
+      singleSliceMode: false, // Disable manual single slice
+      showSlices: true, // Ensure slices are visible
+    }));
   };
 
 
@@ -319,17 +336,21 @@ const STLViewer = ({ stlFile }) => {
   useEffect(() => {
     if (geometry && sceneState.scene && workerInstanceRef.current) {
       clearSlices(sceneState.scene); // Clear old slices immediately
-      if (debouncedSlicingParams.showSlices) {
-        let sliceValueToRender = null;
-        if (debouncedSlicingParams.singleSliceMode) {
-          sliceValueToRender = debouncedSlicingParams.currentSliceValue; // Use currentSliceValue
-        }
+      
+      let sliceValueToRender = null;
+      let showSlicesForWorker = debouncedSlicingParams.showSlices;
 
-        // Prepare data for the worker (transferable objects like Float32Array)
-        // CRITICAL FIX: Create a NEW Float32Array to send a COPY of the buffer
-        // By NOT including positionArrayCopy.buffer in the transfer list,
-        // postMessage will perform a structured clone (copy) instead of a transfer.
-        // This keeps the original geometry's buffer intact on the main thread.
+      if (showMiddleSlice && geometry.boundingBox) {
+        // Calculate middle slice value
+        const bboxMin = geometry.boundingBox.min[debouncedSlicingParams.slicingPlane.toLowerCase()];
+        const bboxMax = geometry.boundingBox.max[debouncedSlicingParams.slicingPlane.toLowerCase()];
+        sliceValueToRender = (bboxMin + bboxMax) / 2;
+        showSlicesForWorker = true; // Ensure slices are shown if middle slice is active
+      } else if (debouncedSlicingParams.singleSliceMode) {
+        sliceValueToRender = debouncedSlicingParams.currentSliceValue;
+      }
+
+      if (showSlicesForWorker) {
         const positionArrayCopy = new Float32Array(geometry.attributes.position.array);
         const bboxData = {
           min: geometry.boundingBox.min.toArray(),
@@ -342,13 +363,14 @@ const STLViewer = ({ stlFile }) => {
             positionArray: positionArrayCopy, // Send the copy
             bboxData: bboxData,
             sliceHeight: debouncedSlicingParams.sliceHeight,
-            currentSlice: sliceValueToRender,
+            currentSlice: sliceValueToRender, // Pass the calculated or selected slice value
             slicingPlane: debouncedSlicingParams.slicingPlane,
           }
-        }); // Removed the transfer list argument
+        });
       }
     }
-  }, [debouncedSlicingParams, geometry, sceneState.scene]); // Depends on debounced state and geometry
+  }, [debouncedSlicingParams, geometry, sceneState.scene, showMiddleSlice]); // Add showMiddleSlice to dependencies
+
 
   // --- 6. Utility Functions ---
   const clearSlices = (scene) => {
@@ -614,6 +636,16 @@ ${svgPaths}
         </label>
 
         <label style={{ marginLeft: 20 }}>
+          <input
+            type="checkbox"
+            checked={showMiddleSlice} // New state
+            onChange={handleToggleMiddleSlice} // New handler
+            style={{ marginRight: 5 }}
+          />
+          Show Middle Slice {/* New UI label */}
+        </label>
+
+        <label style={{ marginLeft: 20 }}>
           Plane:
           <select value={slicingParams.slicingPlane} onChange={handlePlaneChange} style={{ marginLeft: 5, padding: 3 }}>
             <option value="Z">Z</option>
@@ -627,12 +659,13 @@ ${svgPaths}
             type="checkbox"
             checked={slicingParams.singleSliceMode}
             onChange={handleToggleSingleSliceMode}
+            disabled={showMiddleSlice} // Disable if middle slice is active
             style={{ marginRight: 5 }}
           />
           Single Slice Mode
         </label>
 
-        <label style={{ marginLeft: 10, opacity: slicingParams.singleSliceMode ? 1 : 0.5 }}>
+        <label style={{ marginLeft: 10, opacity: slicingParams.singleSliceMode && !showMiddleSlice ? 1 : 0.5 }}>
           Slice Position:
           <input
             type="range"
@@ -641,7 +674,7 @@ ${svgPaths}
             step="1" // Step by 1 for layer index
             value={currentLayerIndex} // Use currentLayerIndex for the slider
             onChange={handleStepChange}
-            disabled={!geometry || !slicingParams.singleSliceMode || totalLayers <= 1} // Disable if only 1 layer
+            disabled={!geometry || !slicingParams.singleSliceMode || totalLayers <= 1 || showMiddleSlice} // Disable if only 1 layer or middle slice is active
             style={{ marginLeft: 5, width: 150 }}
           />
           <span style={{ marginLeft: 5 }}>{slicingParams.currentSliceValue.toFixed(2)}</span> {/* Display actual coordinate */}
