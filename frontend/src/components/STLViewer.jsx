@@ -1,10 +1,12 @@
+// src/components/STLViewer.jsx (No changes needed, use the previous version)
+
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import * as THREE from "three";
 import { STLLoader } from "three-stdlib";
 import { OrbitControls } from "three-stdlib";
 import { saveAs } from "file-saver";
 // Import ClipperLib directly in the worker
-import * as ClipperLib from 'js-clipper';
+// import * as ClipperLib from 'js-clipper'; // This line is not needed here anymore
 
 // Correct way to import a Web Worker in modern bundlers (like Create React App v5+)
 // This creates a URL for the worker script which can then be instantiated.
@@ -439,8 +441,8 @@ ${svgPaths}
           Slice Height:
           <input
             type="number"
-            step="1"
-            min="1"
+            step="0.1"
+            min="0.1"
             value={slicingParams.sliceHeight}
             onChange={handleSliceHeightChange}
             style={{ marginLeft: 5, width: 60, padding: 3 }}
@@ -482,7 +484,7 @@ ${svgPaths}
             type="range"
             min={minRangeValue}
             max={maxRangeValue}
-            step="1"
+            step="0.1"
             value={slicingParams.currentSlice}
             onChange={handleStepChange}
             disabled={!geometry || !slicingParams.singleSliceMode}
