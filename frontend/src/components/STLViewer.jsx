@@ -55,6 +55,23 @@ const STLViewer = ({ stlFile }) => {
 
     const blob = new Blob([dxfContent], { type: "application/dxf" });
     saveAs(blob, "slice.dxf");
+
+    const svgLines = lines.map(line => {
+      const pos = line.geometry.attributes.position;
+      let pathData = '';
+      for (let i = 0; i < pos.count; i += 2) {
+        const x1 = pos.getX(i);
+        const y1 = pos.getY(i);
+        const x2 = pos.getX(i + 1);
+        const y2 = pos.getY(i + 1);
+        pathData += `<path d=\"M ${x1},${-y1} L ${x2},${-y2}\" stroke=\"black\" fill=\"none\"/>\n`;
+      }
+      return pathData;
+    }).join('');
+
+    const svg = `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\">\n${svgLines}</svg>`;
+    const svgBlob = new Blob([svg], { type: 'image/svg+xml' });
+    saveAs(svgBlob, 'slice.svg');
   };
 
   const clearSlices = (scene) => {
@@ -64,7 +81,6 @@ const STLViewer = ({ stlFile }) => {
 
   const sliceSTL = (geometry, scene, heightStep = 2, currentZ = null, plane = "Z") => {
     const position = geometry.attributes.position;
-    const segments = new Set();
     const bbox = geometry.boundingBox;
 
     let axis, min, max;
@@ -219,7 +235,7 @@ const STLViewer = ({ stlFile }) => {
           />
         </label>
         <button onClick={exportCurrentSlice} style={{ marginLeft: 20 }}>
-          Export DXF
+          Export DXF & SVG
         </button>
       </div>
       <div ref={mountRef} style={{ width: "100%", height: "90vh" }} />
