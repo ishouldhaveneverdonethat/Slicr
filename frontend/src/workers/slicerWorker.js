@@ -1,12 +1,11 @@
 // src/workers/slicerWorker.js
 
-// Import ClipperLib directly in the worker
 import * as ClipperLib from 'js-clipper';
-import * as THREE from 'three'; // Import Three.js for Vector3, BufferGeometry etc.
+import * as THREE from 'three';
 
-// Define CL_SCALE here, consistent with the main thread
-const CL_SCALE = 10000000; // Increased scale factor for ClipperLib (10 million)
-const EPSILON = 1e-5; // Epsilon for floating point comparisons
+const CL_SCALE = 10000000; // Scale factor for ClipperLib (10 million)
+const EPSILON = 1e-5; // Epsilon for filtering very small segments (e.g., zero length)
+const SNAP_TOLERANCE = 0.0001; // Tolerance for snapping points, e.g., 0.0001mm (0.1 microns)
 
 /**
  * getSliceSegments (Worker-side)
@@ -25,7 +24,7 @@ function getSliceSegments(positionArray, bboxData, heightStep, currentSliceVal, 
     const slicesData = [];
 
     if (!bboxData || !bboxData.min || !bboxData.max) {
-        console.warn("Bounding box data not provided to worker. Cannot slice.");
+        console.warn("Worker: Bounding box data not provided. Cannot slice.");
         return slicesData;
     }
 
@@ -103,6 +102,73 @@ function getSliceSegments(positionArray, bboxData, heightStep, currentSliceVal, 
 }
 
 /**
+ * snapPointsToGrid (Worker-side)
+ * Snaps 2D points to a grid to merge nearly coincident points,
+ * improving robustness for ClipperLib.
+ * @param {Array<Array<number[]>>} rawSegments Array of segments, each [point1_3D, point2_3D].
+ * @param {number} slicePlaneValue The Z/X/Y value of the current slice plane.
+ * @param {'X' | 'Y' | 'Z'} plane The slicing plane for 2D projection.
+ * @returns {Array<Array<ClipperLib.IntPoint>>} Cleaned 2D segments as ClipperLib.IntPoint arrays.
+ */
+function snapPointsToGrid(rawSegments, slicePlaneValue, plane) {
+    const snappedSegments = [];
+    const uniquePointsMap = new Map(); // Map<string (key), ClipperLib.IntPoint>
+
+    rawSegments.forEach(segment => {
+        const p1_3D = new THREE.Vector3().fromArray(segment[0]);
+        const p2_3D = new THREE.Vector3().fromArray(segment[1]);
+
+        let x1_2D, y1_2D, x2_2D, y2_2D;
+
+        if (plane === "Z") {
+            x1_2D = p1_3D.x; y1_2D = p1_3D.y;
+            x2_2D = p2_3D.x; y2_2D = p2_3D.y;
+        } else if (plane === "X") {
+            x1_2D = p1_3D.y; y1_2D = p1_3D.z;
+            x2_2D = p2_3D.y; y2_2D = p2_3D.z;
+        } else { // Y plane
+            x1_2D = p1_3D.x; y1_2D = p1_3D.z;
+            x2_2D = p2_3D.x; y2_2D = p2_3D.z;
+        }
+
+        // Snap to grid
+        const snapFactor = 1 / SNAP_TOLERANCE; // e.g., 1 / 0.0001 = 10000
+        const snappedX1 = Math.round(x1_2D * snapFactor) / snapFactor;
+        const snappedY1 = Math.round(y1_2D * snapFactor) / snapFactor;
+        const snappedX2 = Math.round(x2_2D * snapFactor) / snapFactor;
+        const snappedY2 = Math.round(y2_2D * snapFactor) / snapFactor;
+
+        // Create unique keys for the snapped points
+        const key1 = `${snappedX1.toFixed(6)},${snappedY1.toFixed(6)}`;
+        const key2 = `${snappedX2.toFixed(6)},${snappedY2.toFixed(6)}`;
+
+        let intP1, intP2;
+
+        if (uniquePointsMap.has(key1)) {
+            intP1 = uniquePointsMap.get(key1);
+        } else {
+            intP1 = { X: Math.round(snappedX1 * CL_SCALE), Y: Math.round(snappedY1 * CL_SCALE) };
+            uniquePointsMap.set(key1, intP1);
+        }
+
+        if (uniquePointsMap.has(key2)) {
+            intP2 = uniquePointsMap.get(key2);
+        } else {
+            intP2 = { X: Math.round(snappedX2 * CL_SCALE), Y: Math.round(snappedY2 * CL_SCALE) };
+            uniquePointsMap.set(key2, intP2);
+        }
+
+        // Only add segment if points are not identical after snapping
+        if (intP1.X !== intP2.X || intP1.Y !== intP2.Y) {
+            snappedSegments.push([intP1, intP2]);
+        }
+    });
+
+    return snappedSegments;
+}
+
+
+/**
  * processSlicesWithClipper (Worker-side)
  * Processes raw segments using js-clipper and returns processed contours.
  * @param {Array<{ value: number, segments: Array<Array<number[]>> }>} slicesData Data for each slice plane.
@@ -119,32 +185,21 @@ function processSlicesWithClipper(slicesData, plane) {
             return;
         }
 
+        // Step 1: Snap points to a grid to merge nearly coincident vertices
+        const snappedIntSegments = snapPointsToGrid(rawSegments, slicePlaneValue, plane);
+
+        if (snappedIntSegments.length === 0) {
+            // After snapping, if no valid segments remain, skip this slice
+            return;
+        }
+
         const clipper = new ClipperLib.Clipper();
         const subjectPaths = new ClipperLib.Paths();
 
-        rawSegments.forEach(segment => {
-            const p1 = new THREE.Vector3().fromArray(segment[0]);
-            const p2 = new THREE.Vector3().fromArray(segment[1]);
-
-            let x1, y1, x2, y2;
-
-            if (plane === "Z") {
-                x1 = p1.x; y1 = p1.y;
-                x2 = p2.x; y2 = p2.y;
-            } else if (plane === "X") {
-                x1 = p1.y; y1 = p1.z;
-                x2 = p2.y; y2 = p2.z;
-            } else { // Y plane
-                x1 = p1.x; y1 = p1.z;
-                x2 = p2.x; y2 = p2.z;
-            }
-
-            const intP1 = { X: Math.round(x1 * CL_SCALE), Y: Math.round(y1 * CL_SCALE) };
-            const intP2 = { X: Math.round(x2 * CL_SCALE), Y: Math.round(y2 * CL_SCALE) };
-
+        snappedIntSegments.forEach(segment => {
             const path = new ClipperLib.Path();
-            path.push(intP1);
-            path.push(intP2);
+            path.push(segment[0]); // intP1
+            path.push(segment[1]); // intP2
             subjectPaths.push(path);
         });
 
@@ -166,7 +221,6 @@ function processSlicesWithClipper(slicesData, plane) {
             if (!clipperSuccess) {
                 console.warn(`Worker: ClipperLib Execute failed for slice at value: ${slicePlaneValue}. Falling back to raw segments.`);
                 isFallback = true;
-                // Convert raw segments to a flat array of points for fallback rendering
                 rawSegments.forEach(segment => {
                     finalContours.push(...segment[0], ...segment[1]);
                 });
@@ -191,8 +245,6 @@ function processSlicesWithClipper(slicesData, plane) {
                     });
                     if (threeJsPoints.length > 0) {
                         finalContours.push(...threeJsPoints); // Add to final contours
-                        // For LineLoop, we need to explicitly close the loop by adding the first point again
-                        // This is handled on the main thread when creating THREE.LineLoop
                     }
                 });
             }
@@ -209,7 +261,7 @@ function processSlicesWithClipper(slicesData, plane) {
                 value: slicePlaneValue,
                 contours: finalContours, // Flattened array of coordinates
                 isFallback: isFallback,
-                plane: plane // Also send plane back for consistency in rendering
+                plane: plane
             });
         }
     });
@@ -225,13 +277,10 @@ self.onmessage = function(event) {
     if (type === 'sliceModel') {
         const { positionArray, bboxData, sliceHeight, currentSlice, slicingPlane } = payload;
 
-        // Perform slicing to get raw segments
         const slicesData = getSliceSegments(positionArray, bboxData, sliceHeight, currentSlice, slicingPlane);
 
-        // Process segments with ClipperLib
         const processedContours = processSlicesWithClipper(slicesData, slicingPlane);
 
-        // Send results back to main thread
         self.postMessage({ type: 'slicingComplete', payload: processedContours });
     }
 };
