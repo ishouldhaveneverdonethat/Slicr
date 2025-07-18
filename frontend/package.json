@@ -10,8 +10,11 @@
     "react": "^18.0.0",
     "react-dom": "^18.0.0",
     "react-scripts": "5.0.1"
+    "three": "^0.160.0",
+    "three-stdlib": "^2.21.1"
+}
   },
-  "browserslist": {
+    "browserslist": {
     "production": [
       ">0.2%",
       "not dead",
