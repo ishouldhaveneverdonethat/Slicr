@@ -3,8 +3,10 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader';
 
-// Create a new Web Worker instance for slicing operations.
-const slicerWorker = new Worker(new URL('./slicerWorker.js', import.meta.url), { type: 'module' });
+// CORRECTED PATH: This path now correctly points to slicerWorker.js
+// relative to STLViewer.jsx's location (/frontend/src/components/).
+// slicerWorker.js is located at /frontend/src/workers/slicerWorker.js.
+const slicerWorker = new Worker(new URL('../workers/slicerWorker.js', import.meta.url), { type: 'module' });
 
 const STLViewer = ({ stlUrl }) => {
     // Refs for Three.js elements to persist across renders
@@ -98,7 +100,7 @@ const STLViewer = ({ stlUrl }) => {
                 materialThickness: parseFloat(materialThickness),
                 laserKerf: parseFloat(laserKerf),
                 slicingOrientation: slicingAxis,
-                numInterconnects: parseInt(numInterconnects, 10),
+                numInterconnects: parseInt(numInterconnects, 10), // Pass new parameter
             };
 
             // Send the original buffer and the scaling factor to the worker
@@ -295,7 +297,7 @@ const STLViewer = ({ stlUrl }) => {
     // Calculate total number of slices for UI display
     const totalSlices = slicedData?.outlines?.length || 0;
 
-    // --- NEW: SVG Export Functionality ---
+    // --- SVG Export Functionality ---
     const exportSliceAsSVG = useCallback(() => {
         if (!slicedData || !slicedData.outlines || slicedData.outlines.length === 0) {
             console.warn("No sliced data to export.");
