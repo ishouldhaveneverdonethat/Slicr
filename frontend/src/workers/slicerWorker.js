@@ -1,339 +1,399 @@
-// src/workers/slicerWorker.js
+// slicerWorker.js
+// This worker is responsible for performing the computationally intensive slicing
+// of a 3D STL model into 2D cross-sections (ribs) based on user-defined parameters.
 
-import * as ClipperLib from 'js-clipper';
-import * as THREE from 'three';
+import * as THREE from 'three'; // Import Three.js for geometry handling
+import { STLLoader } from 'three/addons/loaders/STLLoader.js'; // Import STLLoader for parsing STL files
 
-const CL_SCALE = 10000000; // Scale factor for ClipperLib (10 million)
-const EPSILON = 1e-5; // Epsilon for filtering very small segments (e.g., zero length)
-const SNAP_TOLERANCE = 0.5; // Significantly increased tolerance for snapping points, e.g., 0.5mm
+// Listen for messages from the main thread
+self.onmessage = async function(event) {
+    const { type, payload } = event.data;
+
+    // Handle 'sliceModel' message to start the slicing process
+    if (type === 'sliceModel') {
+        const { stlBuffer, scaleFactor, config } = payload; // Receive scaleFactor from main thread
+
+        // Extract configuration parameters from the payload
+        const {
+            materialThickness,
+            laserKerf,
+            slicingOrientation,
+            numInterconnects, // New parameter: number of interconnects
+        } = config;
+
+        console.log('Worker received slice request with config:', config);
+
+        try {
+            // 1. Parse the STL data using STLLoader
+            const loader = new STLLoader();
+            const geometry = loader.parse(stlBuffer);
+
+            // --- NEW: Apply Model Scaling ---
+            // Scale the geometry to fit the target bounding box (200x200x300mm)
+            geometry.scale(scaleFactor, scaleFactor, scaleFactor);
+            geometry.computeBoundingBox(); // Recompute bounding box after scaling
+
+            // 2. Perform Multi-Axis Slicing
+            const slicedOutlines = await performMultiAxisSlicing(
+                geometry,
+                materialThickness,
+                slicingOrientation,
+                config // Pass full config for future use in joint generation
+            );
+
+            // 3. (Future Step) Generate Interconnections here based on numInterconnects and materialThickness
+            // This is where the tabs/slots would be added to the 2D outlines.
+            // The size of these cutouts will depend on `materialThickness` and `laserKerf`.
+            // The number of cutouts will depend on `numInterconnects`.
+
+            // Send the complete sliced outlines back to the main thread
+            self.postMessage({
+                type: 'slicingComplete',
+                payload: {
+                    outlines: slicedOutlines,
+                    config: config // Send config back so main thread knows slicing parameters
+                }
+            });
+
+        } catch (error) {
+            console.error('Error in slicerWorker:', error);
+            // Send an error message back to the main thread if something goes wrong
+            self.postMessage({
+                type: 'slicingError',
+                payload: { message: error.message }
+            });
+        }
+    }
+};
 
 /**
- * getSliceSegments (Worker-side)
- * Extracts raw intersection points (segments) for each slice plane.
- * This function focuses only on finding the intersections, not on contour reconstruction.
- * It operates on raw position array and bounding box data.
- * @param {Float32Array} positionArray The raw position attribute array from BufferGeometry.
- * @param {object} bboxData Bounding box data {min: {x,y,z}, max: {x,y,z}}.
- * @param {number} heightStep The height between slices.
- * @param {number | null} currentSliceVal If not null, only slice at this specific value.
- * @param {'X' | 'Y' | 'Z'} plane The slicing plane (e.g., 'Z' for XY slices).
- * @param {number} scaleX Scale factor for X-axis.
- * @param {number} scaleY Scale factor for Y-axis.
- * @param {number} scaleZ Scale factor for Z-axis.
- * @returns {Array<{ value: number, segments: Array<Array<number[]>> }>} An array of objects,
- * each containing the slice plane value and its raw segments (as array of [x, y, z] arrays).
+ * Performs multi-axis slicing on a 3D model geometry.
+ * This function iterates through planes along the specified axis and calls
+ * a sub-function to find intersections.
+ *
+ * @param {THREE.BufferGeometry} geometry The 3D model geometry (from STLLoader).
+ * @param {number} materialThickness The desired spacing between each 2D slice.
+ * @param {string} slicingOrientation The axis along which to slice ('X', 'Y', 'Z').
+ * @param {object} config The full configuration object (for future expansion).
+ * @returns {Array<Array<Array<number>>>} An array of slices, where each slice
+ * contains an array of 2D loops (polygons),
+ * and each loop is an array of [x, y] points.
  */
-function getSliceSegments(positionArray, bboxData, heightStep, currentSliceVal, plane, scaleX, scaleY, scaleZ) {
-    const slicesData = [];
+async function performMultiAxisSlicing(geometry, materialThickness, slicingOrientation, config) {
+    const outlines = [];
+    const bbox = geometry.boundingBox; // Get the bounding box of the *scaled* model
 
-    if (!bboxData || !bboxData.min || !bboxData.max) {
-        return slicesData;
+    let minCoord, maxCoord, planeNormal, upVector, axisIndex;
+
+    // Determine the slicing axis and set up coordinates and vectors accordingly
+    switch (slicingOrientation.toUpperCase()) {
+        case 'X':
+            minCoord = bbox.min.x;
+            maxCoord = bbox.max.x;
+            planeNormal = new THREE.Vector3(1, 0, 0); // Plane perpendicular to X-axis
+            upVector = new THREE.Vector3(0, 1, 0);    // Y-axis becomes 'up' in the 2D slice plane (X-slice = YZ plane)
+            axisIndex = 0;
+            break;
+        case 'Y':
+            minCoord = bbox.min.y;
+            maxCoord = bbox.max.y;
+            planeNormal = new THREE.Vector3(0, 1, 0); // Plane perpendicular to Y-axis
+            upVector = new THREE.Vector3(0, 0, 1);    // Z-axis becomes 'up' in the 2D slice plane (Y-slice = XZ plane)
+            axisIndex = 1;
+            break;
+        case 'Z':
+        default: // Default to Z-axis slicing if not specified or invalid
+            minCoord = bbox.min.z;
+            maxCoord = bbox.max.z;
+            planeNormal = new THREE.Vector3(0, 0, 1); // Plane perpendicular to Z-axis
+            upVector = new THREE.Vector3(0, 1, 0);    // Y-axis becomes 'up' in the 2D slice plane (Z-slice = XY plane)
+            axisIndex = 2;
+            break;
     }
 
-    let axis;
-    let min, max;
-    
-    // Determine the axis and min/max bounds based on the slicing plane
-    // Apply scaling to the bounding box values
-    if (plane === "Z") {
-        axis = "z";
-        min = bboxData.min[2] * scaleZ; // Z-axis scaled
-        max = bboxData.max[2] * scaleZ; // Z-axis scaled
-    } else if (plane === "X") {
-        axis = "x";
-        min = bboxData.min[0] * scaleX; // X-axis scaled
-        max = bboxData.max[0] * scaleX; // X-axis scaled
-    } else { // Y plane
-        axis = "y";
-        min = bboxData.min[1] * scaleY; // Y-axis scaled
-        max = bboxData.max[1] * scaleY; // Y-axis scaled
+    // Calculate the number of slices needed based on model extent and material thickness
+    // This is now derived, not a direct user input "number of slices"
+    const modelExtent = maxCoord - minCoord;
+    const numberOfSlices = Math.floor(modelExtent / materialThickness); // Use floor to ensure full slices
+
+    console.log(`Slicing along ${slicingOrientation} axis. Model extent: ${modelExtent.toFixed(2)}mm. Material thickness: ${materialThickness}mm. Generating ${numberOfSlices} slices.`);
+
+    // Iterate through each desired slice position
+    for (let i = 0; i < numberOfSlices; i++) {
+        const slicePosition = minCoord + (i * materialThickness) + (materialThickness / 2); // Slice through the middle of the material
+        const plane = new THREE.Plane();
+        // Define the slicing plane: a point on the plane and its normal
+        plane.setFromNormalAndCoplanarPoint(planeNormal, new THREE.Vector3().copy(planeNormal).multiplyScalar(slicePosition));
+
+        // Call the detailed intersection function
+        const sliceLoops = intersectMeshWithPlane(geometry, plane, axisIndex, planeNormal, upVector);
+
+        if (sliceLoops && sliceLoops.length > 0) {
+            outlines.push(sliceLoops);
+        }
+
+        // Post progress updates back to the main thread
+        self.postMessage({
+            type: 'slicingProgress',
+            payload: { progress: (i / numberOfSlices) * 100 }
+        });
     }
 
-    const valuesToSlice =
-        currentSliceVal !== null
-            ? [currentSliceVal]
-            : Array.from({ length: Math.floor((max - min) / heightStep) + 1 }, (_, i) => min + i * heightStep);
+    console.log('Slicing complete. Total slices generated:', outlines.length);
+    return outlines;
+}
 
-    const p1 = new THREE.Vector3();
-    const p2 = new THREE.Vector3();
-    const p3 = new THREE.Vector3();
 
-    valuesToSlice.forEach((value) => {
-        const segmentsForCurrentSlice = [];
+/**
+ * IMPORTANT: This function now outlines the full plane-mesh intersection and stitching logic.
+ * The actual implementation of the stitching part needs to be robustly filled in.
+ *
+ * This function's goal is to:
+ * 1. Find all line segments where the 'plane' intersects the triangles of the 'geometry'.
+ * 2. Stitch these line segments together to form closed 2D polygons (loops).
+ * 3. Project these 3D loop points onto a 2D plane.
+ *
+ * @param {THREE.BufferGeometry} geometry The 3D model geometry.
+ * @param {THREE.Plane} plane The slicing plane.
+ * @param {number} axisIndex The index of the axis being sliced (0 for X, 1 for Y, 2 for Z).
+ * @param {THREE.Vector3} planeNormal Normal of the slicing plane.
+ * @param {THREE.Vector3} upVector Vector defining 'up' for the 2D projection.
+ * @returns {Array<Array<Array<number>>>} An array of loops, where each loop is an array of [x, y] points.
+ */
+function intersectMeshWithPlane(geometry, plane, axisIndex, planeNormal, upVector) {
+    const segments = []; // To store all intersection line segments found
+    const loops = [];    // To store the final closed 2D polygons
 
-        for (let i = 0; i < positionArray.length; i += 9) { // 9 components per triangle (3 vertices * 3 components/vertex)
-            // Apply scaling to each vertex before using it for intersection
-            p1.set(positionArray[i] * scaleX, positionArray[i + 1] * scaleY, positionArray[i + 2] * scaleZ);
-            p2.set(positionArray[i + 3] * scaleX, positionArray[i + 4] * scaleY, positionArray[i + 5] * scaleZ);
-            p3.set(positionArray[i + 6] * scaleX, positionArray[i + 7] * scaleY, positionArray[i + 8] * scaleZ);
+    const positionAttribute = geometry.attributes.position;
+    const indexAttribute = geometry.index;
 
-            const triangle = [p1, p2, p3];
-            const currentTriangleIntersectionPoints = [];
+    // Define a small epsilon for floating point comparisons to handle precision issues
+    const EPSILON = 1e-6;
+
+    /**
+     * Helper function to check if two 3D points are approximately equal.
+     * @param {THREE.Vector3} p1
+     * @param {THREE.Vector3} p2
+     * @returns {boolean} True if points are approximately equal.
+     */
+    function arePointsEqual(p1, p2) {
+        return p1.distanceTo(p2) < EPSILON;
+    }
+
+    /**
+     * Helper function to calculate intersection of a line segment with a plane.
+     * Returns the intersection point (THREE.Vector3) or null if no intersection within segment.
+     * Handles cases where a vertex or edge lies exactly on the plane.
+     * @param {THREE.Vector3} p1 Start point of the line segment.
+     * @param {THREE.Vector3} p2 End point of the line segment.
+     * @param {THREE.Plane} plane The plane to intersect with.
+     * @returns {THREE.Vector3 | null} The intersection point, or null.
+     */
+    function intersectLinePlane(p1, p2, plane) {
+        const line = new THREE.Line3(p1, p2);
+        const intersectionPoint = new THREE.Vector3();
+        const result = plane.intersectLine(line, intersectionPoint);
+
+        if (result) {
+            // Check if the intersection point is within the segment (inclusive of endpoints)
+            const dist1 = intersectionPoint.distanceTo(p1);
+            const dist2 = intersectionPoint.distanceTo(p2);
+            const segmentLength = p1.distanceTo(p2);
+
+            if (dist1 < segmentLength + EPSILON && dist2 < segmentLength + EPSILON) {
+                return intersectionPoint;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Helper function to project a 3D point onto the 2D plane defined by uVector and vVector.
+     * @param {THREE.Vector3} point3D The 3D point to project.
+     * @param {THREE.Vector3} origin An origin point on the 2D plane.
+     * @param {THREE.Vector3} uVector The U-axis of the 2D plane.
+     * @param {THREE.Vector3} vVector The V-axis of the 2D plane.
+     * @returns {Array<number>} An array [x2D, y2D] representing the projected point.
+     */
+    function projectTo2D(point3D, origin, uVector, vVector) {
+        const relativePoint = new THREE.Vector3().subVectors(point3D, origin);
+        const x2D = relativePoint.dot(uVector);
+        const y2D = relativePoint.dot(vVector);
+        return [x2D, y2D];
+    }
+
+    // Create a local basis for the 2D plane (u, v vectors)
+    const planeOrigin = plane.coplanarPoint(new THREE.Vector3());
+    const uVector = new THREE.Vector3().crossVectors(planeNormal, upVector).normalize();
+    const vVector = new THREE.Vector3().crossVectors(uVector, planeNormal).normalize();
+
+
+    if (indexAttribute) {
+        // Indexed geometry: iterate through faces using indices
+        for (let i = 0; i < indexAttribute.count; i += 3) {
+            const iA = indexAttribute.getX(i + 0);
+            const iB = indexAttribute.getX(i + 1);
+            const iC = indexAttribute.getX(i + 2);
+
+            const vA = new THREE.Vector3().fromBufferAttribute(positionAttribute, iA);
+            const vB = new THREE.Vector3().fromBufferAttribute(positionAttribute, iB);
+            const vC = new THREE.Vector3().fromBufferAttribute(positionAttribute, iC);
+
+            const triangleVertices = [vA, vB, vC];
+            const intersectionPointsForTriangle = [];
+
+            // Check each edge of the triangle for intersection with the plane
+            for (let j = 0; j < 3; j++) {
+                const p1 = triangleVertices[j];
+                const p2 = triangleVertices[(j + 1) % 3]; // Next vertex in loop
+
+                const intersection = intersectLinePlane(p1, p2, plane);
+                if (intersection) {
+                    // Add intersection point only if it's not already added (due to precision or shared edges)
+                    let found = false;
+                    for(const existingPoint of intersectionPointsForTriangle) {
+                        if (arePointsEqual(existingPoint, intersection)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        intersectionPointsForTriangle.push(intersection);
+                    }
+                }
+            }
+
+            // If a triangle intersects the plane, it will typically have two intersection points,
+            // forming a line segment.
+            if (intersectionPointsForTriangle.length === 2) {
+                segments.push({
+                    p1: intersectionPointsForTriangle[0],
+                    p2: intersectionPointsForTriangle[1],
+                    used: false // Flag to track if segment has been used in a loop
+                });
+            }
+        }
+    } else {
+        // Non-indexed geometry: iterate directly through vertex triplets (each triplet is a triangle)
+        for (let i = 0; i < positionAttribute.count; i += 9) {
+            const vA = new THREE.Vector3(positionAttribute.getX(i+0), positionAttribute.getY(i+0), positionAttribute.getZ(i+0));
+            const vB = new THREE.Vector3(positionAttribute.getX(i+3), positionAttribute.getY(i+3), positionAttribute.getZ(i+3));
+            const vC = new THREE.Vector3(positionAttribute.getX(i+6), positionAttribute.getY(i+6), positionAttribute.getZ(i+6));
+
+            const triangleVertices = [vA, vB, vC];
+            const intersectionPointsForTriangle = [];
 
             for (let j = 0; j < 3; j++) {
-                const v1 = triangle[j];
-                const v2 = triangle[(j + 1) % 3];
+                const p1 = triangleVertices[j];
+                const p2 = triangleVertices[(j + 1) % 3];
 
-                const val1 = v1[axis];
-                const val2 = v2[axis];
-
-                if (
-                    (val1 <= value + EPSILON && val2 >= value - EPSILON) ||
-                    (val2 <= value + EPSILON && val1 >= value - EPSILON)
-                ) {
-                    if (Math.abs(val2 - val1) < EPSILON) {
-                        continue;
+                const intersection = intersectLinePlane(p1, p2, plane);
+                if (intersection) {
+                    let found = false;
+                    for(const existingPoint of intersectionPointsForTriangle) {
+                        if (arePointsEqual(existingPoint, intersection)) {
+                            found = true;
+                            break;
+                        }
                     }
-
-                    const t = (value - val1) / (val2 - val1);
-                    const intersectPoint = new THREE.Vector3().lerpVectors(v1, v2, t);
-                    currentTriangleIntersectionPoints.push(intersectPoint);
+                    if (!found) {
+                        intersectionPointsForTriangle.push(intersection);
+                    }
                 }
             }
 
-            if (currentTriangleIntersectionPoints.length === 2) {
-                if (currentTriangleIntersectionPoints[0].distanceTo(currentTriangleIntersectionPoints[1]) > EPSILON) {
-                    segmentsForCurrentSlice.push([
-                        currentTriangleIntersectionPoints[0].toArray(),
-                        currentTriangleIntersectionPoints[1].toArray()
-                    ]);
-                }
+            if (intersectionPointsForTriangle.length === 2) {
+                segments.push({
+                    p1: intersectionPointsForTriangle[0],
+                    p2: intersectionPointsForTriangle[1],
+                    used: false
+                });
             }
         }
-        if (segmentsForCurrentSlice.length > 0) {
-            slicesData.push({ value: value, segments: segmentsForCurrentSlice });
-        }
-    });
-    return slicesData;
-}
+    }
 
-/**
- * snapPointsToGrid (Worker-side)
- * Snaps 2D points to a grid to merge nearly coincident points,
- * improving robustness for ClipperLib.
- * @param {Array<Array<number[]>>} rawSegments Array of segments, each [point1_3D, point2_3D].
- * @param {'X' | 'Y' | 'Z'} plane The slicing plane for 2D projection.
- * @returns {Array<Array<ClipperLib.IntPoint>>} Cleaned 2D segments as ClipperLib.IntPoint arrays.
- */
-function snapPointsToGrid(rawSegments, plane) {
-    const snappedSegments = [];
-    const uniquePointsMap = new Map(); // Map<string (key), ClipperLib.IntPoint>
+    // --- STEP 2: Stitching Segments into Closed Loops ---
+    // This is the core algorithm for reconstructing polygons from disjoint segments.
+    // It's a graph traversal problem.
 
-    rawSegments.forEach(segment => {
-        const p1_3D = new THREE.Vector3().fromArray(segment[0]);
-        const p2_3D = new THREE.Vector3().fromArray(segment[1]);
+    while (true) {
+        let currentLoop = [];
+        let startSegment = null;
 
-        let x1_2D, y1_2D, x2_2D, y2_2D;
-
-        if (plane === "Z") { // Project to XY plane
-            x1_2D = p1_3D.x; y1_2D = p1_3D.y;
-            x2_2D = p2_3D.x; y2_2D = p2_3D.y;
-        } else if (plane === "X") { // Project to YZ plane
-            x1_2D = p1_3D.y; y1_2D = p1_3D.z;
-            x2_2D = p2_3D.y; y2_2D = p2_3D.z;
-        } else { // Y plane, project to XZ plane
-            x1_2D = p1_3D.x; y1_2D = p1_3D.z;
-            x2_2D = p2_3D.x; y2_2D = p2_3D.z;
+        // Find an unused segment to start a new loop
+        for (let i = 0; i < segments.length; i++) {
+            if (!segments[i].used) {
+                startSegment = segments[i];
+                break;
+            }
         }
 
-        // Snap to grid using SNAP_TOLERANCE
-        // This rounds coordinates to the nearest multiple of SNAP_TOLERANCE
-        const snapFactor = 1 / SNAP_TOLERANCE; // e.g., 1 / 0.5 = 2
-        const snappedX1 = Math.round(x1_2D * snapFactor) / snapFactor;
-        const snappedY1 = Math.round(y1_2D * snapFactor) / snapFactor;
-        const snappedX2 = Math.round(x2_2D * snapFactor) / snapFactor;
-        const snappedY2 = Math.round(y2_2D * snapFactor) / snapFactor;
-
-        // Create unique keys for the snapped points (using higher precision for keying)
-        // Using a high precision for toFixed to ensure distinct snapped points get distinct keys
-        const key1 = `${snappedX1.toFixed(10)},${snappedY1.toFixed(10)}`;
-        const key2 = `${snappedX2.toFixed(10)},${snappedY2.toFixed(10)}`;
-
-        let intP1, intP2;
-
-        if (uniquePointsMap.has(key1)) {
-            intP1 = uniquePointsMap.get(key1);
-        } else {
-            // Scale up to integers for ClipperLib
-            intP1 = { X: Math.round(snappedX1 * CL_SCALE), Y: Math.round(snappedY1 * CL_SCALE) };
-            uniquePointsMap.set(key1, intP1);
+        if (!startSegment) {
+            // No more unused segments, all loops found
+            break;
         }
 
-        if (uniquePointsMap.has(key2)) {
-            intP2 = uniquePointsMap.get(key2);
-        } else {
-            intP2 = { X: Math.round(snappedX2 * CL_SCALE), Y: Math.round(snappedY2 * CL_SCALE) };
-            uniquePointsMap.set(key2, intP2);
-        }
+        // Start building a loop from the found segment
+        currentLoop.push(startSegment.p1);
+        currentLoop.push(startSegment.p2);
+        startSegment.used = true;
+        let currentPoint = startSegment.p2; // The last point added to the loop
 
-        // Only add segment if points are not identical after snapping AND scaling to ClipperLib integers
-        // This ensures we don't add zero-length segments to ClipperLib
-        if (intP1.X !== intP2.X || intP1.Y !== intP2.Y) {
-            snappedSegments.push([intP1, intP2]);
-        }
-    });
-
-    return snappedSegments;
-}
-
-/**
- * traceContours (Worker-side)
- * Traces closed contours from a set of disconnected line segments.
- * This is a crucial step to provide ClipperLib with proper polygon inputs.
- * @param {Array<Array<ClipperLib.IntPoint>>} segments An array of 2-point segments (ClipperLib.IntPoint arrays).
- * @returns {ClipperLib.Paths} An array of closed ClipperLib.Path objects.
- */
-function traceContours(segments) {
-    const paths = new ClipperLib.Paths();
-    const availableSegments = new Set(segments.map((_, i) => i)); // Track indices of unused segments
-
-    // Build an adjacency list: Map<stringifiedPoint, Array<{ segmentIndex, otherPoint }>>
-    const adjacencyList = new Map();
-
-    segments.forEach((segment, index) => {
-        const p1 = segment[0];
-        const p2 = segment[1];
-
-        const key1 = `${p1.X},${p1.Y}`;
-        const key2 = `${p2.X},${p2.Y}`;
-
-        if (!adjacencyList.has(key1)) adjacencyList.set(key1, []);
-        if (!adjacencyList.has(key2)) adjacencyList.set(key2, []);
-
-        // Store references to the segment index and the *other* endpoint
-        adjacencyList.get(key1).push({ segmentIndex: index, point: p2 });
-        adjacencyList.get(key2).push({ segmentIndex: index, point: p1 });
-    });
-
-    while (availableSegments.size > 0) {
-        // Pick an arbitrary unused segment to start a new contour
-        const startIndex = availableSegments.values().next().value;
-        availableSegments.delete(startIndex); // Mark as used
-
-        const currentPath = new ClipperLib.Path();
-        let currentSegment = segments[startIndex];
-        let currentPoint = currentSegment[0]; // Start with one end of the segment
-        const startPointOfContour = currentPoint;
-
-        // Add the first point
-        currentPath.push(currentPoint);
-        currentPoint = currentSegment[1]; // Move to the other end of the first segment
-
+        // Keep searching for the next segment that connects to the currentPoint
         let loopClosed = false;
-        let iterationCount = 0;
-        const MAX_ITERATIONS = segments.length * 2 + 5; // Safety break
+        let iterationCount = 0; // Safety break for infinite loops in complex cases
+        const MAX_ITERATIONS = segments.length * 2; // Arbitrary limit (should be enough for simple models)
 
         while (!loopClosed && iterationCount < MAX_ITERATIONS) {
             iterationCount++;
-
-            // Add currentPoint if it's not a duplicate of the last point added
-            if (currentPath.length === 0 || (currentPath[currentPath.length - 1].X !== currentPoint.X || currentPath[currentPath.length - 1].Y !== currentPoint.Y)) {
-                currentPath.push(currentPoint);
-            }
-
-            // Check if we've returned to the starting point of the current contour
-            if (currentPath.length > 1 && currentPoint.X === startPointOfContour.X && currentPoint.Y === startPointOfContour.Y) {
-                loopClosed = true;
-                break;
-            }
-
-            const connectionsFromCurrentPoint = adjacencyList.get(`${currentPoint.X},${currentPoint.Y}`);
-            if (!connectionsFromCurrentPoint || connectionsFromCurrentPoint.length === 0) {
-                // Dead end, cannot close this loop
-                break;
-            }
-
             let foundNextSegment = false;
-            for (const conn of connectionsFromCurrentPoint) {
-                if (availableSegments.has(conn.segmentIndex)) {
-                    // Found an unused segment connected to currentPoint
-                    currentSegment = segments[conn.segmentIndex];
-                    availableSegments.delete(conn.segmentIndex); // Mark as used
 
-                    // The next currentPoint is the *other* end of the found segment
-                    currentPoint = (currentSegment[0].X === currentPoint.X && currentSegment[0].Y === currentPoint.Y) ? currentSegment[1] : currentSegment[0];
-                    foundNextSegment = true;
-                    break;
+            for (let i = 0; i < segments.length; i++) {
+                const segment = segments[i];
+                if (!segment.used) {
+                    if (arePointsEqual(segment.p1, currentPoint)) {
+                        currentLoop.push(segment.p2);
+                        currentPoint = segment.p2;
+                        segment.used = true;
+                        foundNextSegment = true;
+                        break; // Found next segment, break inner loop and continue building current loop
+                    } else if (arePointsEqual(segment.p2, currentPoint)) {
+                        // If the segment's end connects to current point, add its start point
+                        currentLoop.push(segment.p1);
+                        currentPoint = segment.p1;
+                        segment.used = true;
+                        foundNextSegment = true;
+                        break; // Found next segment
+                    }
                 }
             }
 
-            if (!foundNextSegment) {
-                // No more unused segments connected to the current point
-                // Check if we can close the loop by connecting back to the start point
-                if (currentPath.length > 1 && currentPoint.X === startPointOfContour.X && currentPoint.Y === startPointOfContour.Y) {
-                    loopClosed = true;
-                }
-                break;
+            // Check if the loop is closed (currentPoint connects back to the very first point)
+            if (arePointsEqual(currentPoint, currentLoop[0])) {
+                loopClosed = true;
+            }
+
+            if (!foundNextSegment && !loopClosed) {
+                // This indicates a problem: a segment was not connected, or loop couldn't close.
+                // This can happen with malformed geometry or extreme precision issues.
+                console.warn("Could not close loop or find next segment for a slice. Partial loop discarded.");
+                currentLoop = []; // Discard incomplete loop
+                break; // Break out of inner while loop to try finding a new start segment
             }
         }
 
-        if (loopClosed && currentPath.length > 2) { // A valid closed polygon needs at least 3 unique points
-            paths.push(currentPath);
+        if (loopClosed && currentLoop.length > 2) { // A loop needs at least 3 distinct points
+            // Project the 3D points of the closed loop to 2D
+            const projectedLoop = currentLoop.map(p => projectTo2D(p, planeOrigin, uVector, vVector));
+            // Ensure the loop is explicitly closed by adding the first point again for rendering
+            if (!arePointsEqual(currentLoop[0], currentLoop[currentLoop.length - 1])) {
+                 projectedLoop.push(projectedLoop[0]);
+            }
+            loops.push(projectedLoop);
+        } else if (currentLoop.length > 0) {
+            console.warn("Found a degenerate or unclosed loop, discarding.");
         }
-        // If not closed or too short, discard (or handle as open path if needed)
     }
 
-    return paths;
+    return loops;
 }
-
-
-/**
- * processSlicesWithClipper (Worker-side)
- * Processes raw segments and returns them as contours, bypassing ClipperLib for contour generation.
- * @param {Array<{ value: number, segments: Array<Array<number[]>> }>} slicesData Data for each slice plane.
- * @param {'X' | 'Y' | 'Z'} plane The slicing plane, used for projection.
- * @returns {Array<{ value: number, contours: Array<number[]>, isFallback: boolean }>} Processed contours (raw segments).
- */
-function processSlicesWithClipper(slicesData, plane) {
-    const processedSlices = [];
-
-    slicesData.forEach(sliceData => {
-        const { value: slicePlaneValue, segments: rawSegments } = sliceData;
-
-        let finalContours = [];
-        const isFallback = true; // Always true as we are explicitly using raw segments
-
-        if (rawSegments.length === 0) {
-            processedSlices.push({
-                value: slicePlaneValue,
-                contours: [], // No contours for this slice
-                isFallback: false, // Not a fallback, just empty
-                plane: plane
-            });
-            return;
-        }
-
-        // Directly use raw segments for the contours
-        rawSegments.forEach(segment => {
-            // Flatten the 3D points into a single array for BufferGeometry
-            finalContours.push(...segment[0], ...segment[1]);
-        });
-
-        if (finalContours.length > 0) {
-            processedSlices.push({
-                value: slicePlaneValue,
-                contours: finalContours, // Flattened array of coordinates
-                isFallback: isFallback, // Mark as fallback (raw segments)
-                plane: plane
-            });
-        }
-    });
-
-    return processedSlices;
-}
-
-
-// Worker message handler
-self.onmessage = function(event) {
-    const { type, payload } = event.data;
-
-    if (type === 'sliceModel') {
-        const { positionArray, bboxData, sliceHeight, currentSlice, slicingPlane, scaleX, scaleY, scaleZ } = payload; // Destructure new scale params
-
-        const slicesData = getSliceSegments(positionArray, bboxData, sliceHeight, currentSlice, slicingPlane, scaleX, scaleY, scaleZ);
-
-        const processedContours = processSlicesWithClipper(slicesData, slicingPlane);
-
-        self.postMessage({ type: 'slicingComplete', payload: processedContours });
-    }
-};
