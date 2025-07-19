@@ -21,7 +21,7 @@ const STLViewer = ({ stlUrl }) => {
     const sliceGroupRef = useRef(new THREE.Group()); // Group specifically for displaying sliced outlines
 
     // State variables for managing sliced data and UI interactions
-    const [slicedData, setSlicedData] = useState(null);
+    const [slicedData, setSlicedData] = useState(null); // Now includes scaledBbox
     const [currentSliceIndex, setCurrentSliceIndex] = useState(0);
     const [slicingAxis, setSlicingAxis] = useState('Z'); // User-selected axis for slicing (X, Y, or Z)
 
@@ -54,46 +54,40 @@ const STLViewer = ({ stlUrl }) => {
             // Clear any previously loaded model from the scene
             modelGroupRef.current.clear();
 
-            // Parse the STL geometry
-            const loader = new STLLoader();
-            const geometry = loader.parse(arrayBuffer);
-
-            // --- Model Resizing Logic ---
-            geometry.computeBoundingBox();
-            const bbox = geometry.boundingBox;
-            const size = bbox.getSize(new THREE.Vector3());
+            // Parse the STL geometry to get its initial bounding box for scaling calculation
+            const tempLoader = new STLLoader();
+            const tempGeometry = tempLoader.parse(arrayBuffer);
+            tempGeometry.computeBoundingBox();
+            const initialBbox = tempGeometry.boundingBox;
+            const initialSize = initialBbox.getSize(new THREE.Vector3());
 
             const targetWidth = 200;
             const targetHeight = 200;
             const targetDepth = 300; // Assuming Z is depth for the 300mm dimension
 
             // Calculate scaling factors for each dimension
-            const scaleX = targetWidth / size.x;
-            const scaleY = targetHeight / size.y;
-            const scaleZ = targetDepth / size.z;
+            const scaleX = targetWidth / initialSize.x;
+            const scaleY = targetHeight / initialSize.y;
+            const scaleZ = targetDepth / initialSize.z;
 
             // Use the minimum scale factor to ensure the model fits within all dimensions
             const scaleFactor = Math.min(scaleX, scaleY, scaleZ);
 
-            geometry.scale(scaleFactor, scaleFactor, scaleFactor);
-            // Recompute bounding box after scaling
-            geometry.computeBoundingBox();
-            const scaledBbox = geometry.boundingBox;
-            const scaledCenter = scaledBbox.getCenter(new THREE.Vector3());
+            // Create a mesh for display *before* sending to worker, so it's immediately visible
+            const displayGeometry = tempLoader.parse(arrayBuffer); // Re-parse for display mesh
+            displayGeometry.scale(scaleFactor, scaleFactor, scaleFactor); // Apply scaling
+            displayGeometry.computeBoundingBox();
+            const displayScaledCenter = displayGeometry.boundingBox.getCenter(new THREE.Vector3());
 
-            // Create a material for the STL model
             const material = new THREE.MeshPhongMaterial({
                 color: 0xcccccc, // Grey color for the model
                 specular: 0x111111,
                 shininess: 200
             });
-            const mesh = new THREE.Mesh(geometry, material);
-
-            // Center the scaled model in the scene
-            mesh.position.sub(scaledCenter);
-
-            // Add the model to its group, and the group to the scene
+            const mesh = new THREE.Mesh(displayGeometry, material);
+            mesh.position.sub(displayScaledCenter); // Center the display model
             modelGroupRef.current.add(mesh);
+
 
             // Prepare the configuration object for the slicing worker
             const config = {
@@ -184,7 +178,7 @@ const STLViewer = ({ stlUrl }) => {
             const { type, payload } = event.data;
             if (type === 'slicingComplete') {
                 console.log('Main thread received sliced outlines:', payload.outlines);
-                setSlicedData(payload); // Store the received outlines and config
+                setSlicedData(payload); // Store the received outlines, config, and scaledBbox
                 setCurrentSliceIndex(0); // Reset to display the first slice
                 setIsSlicing(false); // Slicing is complete
                 setLoadingProgress(100); // Ensure progress is 100%
@@ -220,38 +214,38 @@ const STLViewer = ({ stlUrl }) => {
             return;
         }
 
-        // Get the outlines for the current slice index
-        const outlinesForCurrentSlice = slicedData.outlines[currentSliceIndex];
-        if (!outlinesForCurrentSlice) return;
+        // Use the scaled bounding box received from the worker for slice positioning
+        const scaledBbox = new THREE.Box3(
+            new THREE.Vector3().fromArray(slicedData.scaledBbox.min),
+            new THREE.Vector3().fromArray(slicedData.scaledBbox.max)
+        );
 
-        // Get the configuration used for slicing to correctly position the slice in 3D space
         const config = slicedData.config || {};
         const thickness = config.materialThickness || 1; // Default thickness if not found
         const orientation = config.slicingOrientation || 'Z';
-
-        // Get the bounding box of the original model (now scaled in worker) to calculate the slice's 3D position
-        // We'll rely on the worker to send back the scaled bbox or ensure consistency.
-        // For now, assume the modelGroupRef's child geometry is already scaled.
-        const bbox = modelGroupRef.current.children[0]?.geometry?.boundingBox;
-        if (!bbox) {
-            console.warn("Bounding box not available for slice positioning. Cannot render slice correctly.");
-            return;
-        }
 
         let slicePosition;
         // Calculate the 3D coordinate of the current slice based on its index and slicing axis
         switch (orientation.toUpperCase()) {
             case 'X':
-                slicePosition = bbox.min.x + (currentSliceIndex * thickness) + (thickness / 2); // Center of the slice
+                slicePosition = scaledBbox.min.x + (currentSliceIndex * thickness) + (thickness / 2); // Center of the slice
                 break;
             case 'Y':
-                slicePosition = bbox.min.y + (currentSliceIndex * thickness) + (thickness / 2); // Center of the slice
+                slicePosition = scaledBbox.min.y + (currentSliceIndex * thickness) + (thickness / 2); // Center of the slice
                 break;
             case 'Z':
             default:
-                slicePosition = bbox.min.z + (currentSliceIndex * thickness) + (thickness / 2); // Center of the slice
+                slicePosition = scaledBbox.min.z + (currentSliceIndex * thickness) + (thickness / 2); // Center of the slice
                 break;
         }
+
+        const outlinesForCurrentSlice = slicedData.outlines[currentSliceIndex];
+        if (!outlinesForCurrentSlice) return;
+
+
+        // Get the center of the *scaled* bounding box for centering the slice visualization
+        // This ensures the lines are drawn relative to the centered model.
+        const scaledCenter = scaledBbox.getCenter(new THREE.Vector3());
 
         // Iterate through each loop (polygon) within the current slice
         outlinesForCurrentSlice.forEach(loop => {
@@ -260,6 +254,7 @@ const STLViewer = ({ stlUrl }) => {
             loop.forEach(([x, y]) => {
                 let p;
                 // Project 2D point onto the correct 3D plane based on slicing orientation
+                // Adjust for the model's centering in the viewer
                 switch (orientation.toUpperCase()) {
                     case 'X': // Slice along X means 2D points are in Y-Z plane
                         p = new THREE.Vector3(slicePosition, x, y);
@@ -272,6 +267,8 @@ const STLViewer = ({ stlUrl }) => {
                         p = new THREE.Vector3(x, y, slicePosition);
                         break;
                 }
+                // Apply the inverse of the model's centering to the slice position
+                p.sub(scaledCenter); // This should align the slice with the centered model
                 points.push(p);
             });
 
