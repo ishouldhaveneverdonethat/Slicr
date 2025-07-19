@@ -32,6 +32,7 @@ self.onmessage = async function(event) {
             // Scale the geometry to fit the target bounding box (200x200x300mm)
             geometry.scale(scaleFactor, scaleFactor, scaleFactor);
             geometry.computeBoundingBox(); // Recompute bounding box after scaling
+            const scaledBbox = geometry.boundingBox.clone(); // Clone to ensure it's a new object for transfer
 
             // 2. Perform Multi-Axis Slicing
             const slicedOutlines = await performMultiAxisSlicing(
@@ -46,12 +47,16 @@ self.onmessage = async function(event) {
             // The size of these cutouts will depend on `materialThickness` and `laserKerf`.
             // The number of cutouts will depend on `numInterconnects`.
 
-            // Send the complete sliced outlines back to the main thread
+            // Send the complete sliced outlines and the scaled bounding box back to the main thread
             self.postMessage({
                 type: 'slicingComplete',
                 payload: {
                     outlines: slicedOutlines,
-                    config: config // Send config back so main thread knows slicing parameters
+                    config: config, // Send config back so main thread knows slicing parameters
+                    scaledBbox: { // Send simplified bbox data for transfer
+                        min: scaledBbox.min.toArray(),
+                        max: scaledBbox.max.toArray()
+                    }
                 }
             });
 
