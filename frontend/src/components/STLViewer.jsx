@@ -299,50 +299,108 @@ const STLViewer = ({ stlFile }) => {
   /* ----------------------------------------------------------
      9.  Export helpers (SVG / DXF)
   ---------------------------------------------------------- */
-  const exportSVG = () => {
-    if (!sceneState.scene) return;
-    const lines = sceneState.scene.children.filter((c) => c.name === 'sliceLine');
-    if (!lines.length) return console.log('No slices to export.');
+const exportSVG = () => {
+  if (!sceneState.scene) return;
+  const lines = sceneState.scene.children.filter((c) => c.name === "sliceLine");
+  if (!lines.length) return console.log("No slices to export.");
 
-    let offsetX = 0;
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    let paths = '';
+  let offsetX = 0;
+  let globalMinX = Infinity,
+    globalMinY = Infinity,
+    globalMaxX = -Infinity,
+    globalMaxY = -Infinity;
+  const sliceGap = 10; // 10 mm horizontal gap between slices
+  let pathStrings = "";
 
-    lines.forEach((line) => {
-      const pos = line.geometry.attributes.position;
-      for (let i = 0; i < pos.count; i += 2) {
-        const p1x = pos.getX(i), p1y = pos.getY(i), p2x = pos.getX(i + 1), p2y = pos.getY(i + 1);
-        [p1x, p1y, p2x, p2y].forEach((c, idx) => {
-          const isX = idx % 2 === 0;
-          (isX ? [minX, maxX] : [minY, maxY]).forEach((b) => (isX ? (b[0] = Math.min(b[0], c)) : (b[1] = Math.max(b[1], c))));
-        });
-        paths += `<path d="M ${offsetX + p1x} ${-p1y} L ${offsetX + p2x} ${-p2y}" stroke="#ff0000" stroke-width="0.1" fill="none"/>`;
+  lines.forEach((line) => {
+    const pos = line.geometry.attributes.position;
+    if (!pos || !pos.count) return;
+
+    // projected bounds for THIS slice
+    let sliceMinX = Infinity,
+      sliceMinY = Infinity,
+      sliceMaxX = -Infinity,
+      sliceMaxY = -Infinity;
+
+    // collect projected 2-D points
+    const projected = [];
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      const z = pos.getZ(i);
+
+      let px, py;
+      if (slicingParams.slicingPlane === "Z") {
+        px = x;
+        py = y;
+      } else if (slicingParams.slicingPlane === "X") {
+        px = z;
+        py = y;
+      } else {
+        // Y
+        px = x;
+        py = z;
       }
-      offsetX += 10;
-    });
+      projected.push(px, py);
 
-    const vb = `${minX} ${-maxY} ${maxX - minX} ${maxY - minY}`;
-    const svg = `<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="${vb}">${paths}</svg>`;
-    saveAs(new Blob([svg], { type: 'image/svg+xml' }), 'slice.svg');
-  };
+      sliceMinX = Math.min(sliceMinX, px);
+      sliceMaxX = Math.max(sliceMaxX, px);
+      sliceMinY = Math.min(sliceMinY, py);
+      sliceMaxY = Math.max(sliceMaxY, py);
+    }
 
-  const exportDXF = () => {
-    if (!sceneState.scene) return;
-    const lines = sceneState.scene.children.filter((c) => c.name === 'sliceLine');
-    if (!lines.length) return console.log('No slices to export.');
+    if (projected.length === 0) return;
 
-    let dxf = '0\nSECTION\n2\nENTITIES\n';
-    lines.forEach((line) => {
-      const pos = line.geometry.attributes.position;
-      for (let i = 0; i < pos.count; i += 2) {
-        const x1 = pos.getX(i), y1 = pos.getY(i), z1 = 0;
-        const x2 = pos.getX(i + 1), y2 = pos.getY(i + 1), z2 = 0;
-        dxf += `0\nLINE\n8\n0\n10\n${x1}\n20\n${y1}\n30\n${z1}\n11\n${x2}\n21\n${y2}\n31\n${z2}\n`;
-      }
-    });
-    dxf += '0\nENDSEC\n0\nEOF';
-    saveAs(new Blob([dxf], { type: 'application/dxf' }), 'slice.dxf');
-  };
+    // build path
+    const pts = [];
+    for (let i = 0; i < projected.length; i += 2) {
+      pts.push(projected[i] + offsetX, -projected[i + 1]); // SVG Y is inverted
+    }
+    pathStrings += `<path d="M ${pts.join(" L ")}" stroke="#ff0000" stroke-width="0.2" fill="none" />\n`;
+
+    // update global bounds
+    globalMinX = Math.min(globalMinX, offsetX + sliceMinX);
+    globalMaxX = Math.max(globalMaxX, offsetX + sliceMaxX);
+    globalMinY = Math.min(globalMinY, -sliceMaxY);
+    globalMaxY = Math.max(globalMaxY, -sliceMinY);
+
+    // move horizontal offset for next slice
+    offsetX += sliceMaxX - sliceMinX + sliceGap;
+  });
+
+  if (!pathStrings) return;
+
+  const width = globalMaxX - globalMinX;
+  const height = globalMaxY - globalMinY;
+  const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="${globalMinX.toFixed(3)} ${globalMinY.toFixed(3)} ${width.toFixed(3)} ${height.toFixed(3)}">
+  ${pathStrings}
+</svg>`;
+
+  saveAs(new Blob([svg], { type: "image/svg+xml" }), "slice.svg");
+};
+
+/* ----------------------------------------------------------
+   DXF Export (fixed)
+---------------------------------------------------------- */
+const exportDXF = () => {
+  if (!sceneState.scene) return;
+  const lines = sceneState.scene.children.filter((c) => c.name === "sliceLine");
+  if (!lines.length) return console.log("No slices to export.");
+
+  let dxf = "0\nSECTION\n2\nENTITIES\n";
+  lines.forEach((line) => {
+    const pos = line.geometry.attributes.position;
+    for (let i = 0; i < pos.count; i += 2) {
+      const p1 = { x: pos.getX(i), y: pos.getY(i), z: 0 };
+      const p2 = { x: pos.getX(i + 1), y: pos.getY(i + 1), z: 0 };
+      dxf += `0\nLINE\n8\n0\n10\n${p1.x}\n20\n${p1.y}\n30\n${p1.z}\n11\n${p2.x}\n21\n${p2.y}\n31\n${p2.z}\n`;
+    }
+  });
+  dxf += "0\nENDSEC\n0\nEOF";
+  saveAs(new Blob([dxf], { type: "application/dxf" }), "slice.dxf");
+};
 
   /* ----------------------------------------------------------
      10.  Slicing trigger (debounced)
