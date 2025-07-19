@@ -1,9 +1,13 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import * as THREE from "three";
 import { STLLoader } from "three-stdlib";
 import { OrbitControls } from "three-stdlib";
 import { saveAs } from "file-saver";
-import * as ClipperLib from 'js-clipper';
+
+// Correct way to import a Web Worker in modern bundlers (like Create React App v5+)
+// This creates a URL for the worker script which can then be instantiated.
+const SlicerWorker = new Worker(new URL('../workers/slicerWorker.js', import.meta.url));
+
 
 const STLViewer = ({ stlFile }) => {
   // --- 1. Model and Geometry State ---
@@ -19,6 +23,93 @@ const STLViewer = ({ stlFile }) => {
     singleSliceMode: false,
     slicingPlane: "Z",
   });
+
+  // --- New state for controlling model outline visibility ---
+  const [showModelOutline, setShowModelOutline] = useState(true); // Default to true
+
+  // --- Debounce state for slicing ---
+  const [debouncedSlicingParams, setDebouncedSlicingParams] = useState(slicingParams);
+  // State to hold the worker instance (now directly the instantiated worker)
+  const workerInstanceRef = useRef(null); // Renamed to avoid confusion with the Worker constructor
+
+  // Initialize Web Worker
+  useEffect(() => {
+    // Assign the imported worker instance to the ref
+    workerInstanceRef.current = SlicerWorker;
+
+    workerInstanceRef.current.onmessage = (event) => {
+      const { type, payload } = event.data;
+      if (type === 'slicingComplete') {
+        // Clear old slices before rendering new ones
+        clearSlices(sceneState.scene);
+        
+        payload.forEach(sliceData => {
+          const { value: slicePlaneValue, contours, isFallback, plane } = sliceData;
+          
+          if (contours.length === 0) return;
+
+          // If isFallback is true, it means we are rendering raw segments (pairs of points)
+          // Otherwise, it implies ClipperLib successfully generated closed contours
+          const materialColor = isFallback ? 0x00ff00 : 0xff0000; // Green for fallback (raw segments), Red for Clipper (closed contours)
+          const sliceMaterial = new THREE.LineBasicMaterial({ color: materialColor });
+
+          const sliceGeometry = new THREE.BufferGeometry();
+          sliceGeometry.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(contours), 3));
+
+          let sliceLine;
+          if (isFallback) {
+            // For raw segments, it's LineSegments (pairs of points)
+            sliceLine = new THREE.LineSegments(sliceGeometry, sliceMaterial);
+          } else {
+            // For Clipper contours, it's LineLoop (closed polygon)
+            // Ensure the loop is closed by duplicating the first point if necessary
+            const positions = sliceGeometry.attributes.position.array;
+            const firstPointX = positions[0];
+            const firstPointY = positions[1];
+            const firstPointZ = positions[2];
+            const lastPointX = positions[positions.length - 3];
+            const lastPointY = positions[positions.length - 2];
+            const lastPointZ = positions[positions.length - 1];
+
+            const arePointsIdentical = Math.abs(firstPointX - lastPointX) < 1e-6 &&
+                                       Math.abs(firstPointY - lastPointY) < 1e-6 &&
+                                       Math.abs(firstPointZ - lastPointZ) < 1e-6;
+
+            if (!arePointsIdentical) {
+                const closedPositions = new Float32Array(positions.length + 3);
+                closedPositions.set(positions);
+                closedPositions.set([firstPointX, firstPointY, firstPointZ], positions.length);
+                sliceGeometry.setAttribute('position', new THREE.Float32BufferAttribute(closedPositions, 3));
+            }
+            sliceLine = new THREE.LineLoop(sliceGeometry, sliceMaterial);
+          }
+          
+          sliceLine.name = "sliceLine";
+          sceneState.scene.add(sliceLine);
+        });
+      }
+    };
+
+    // No need to terminate here as the worker is a singleton created outside the component
+    // If you wanted a new worker instance per component mount, you'd create `new Worker(...)` here
+    // and return `workerInstanceRef.current.terminate()` in the cleanup.
+    // For performance, a single shared worker is often better for this kind of task.
+    // However, if the worker needs to be reset or if multiple instances are needed,
+    // you would manage its lifecycle within this useEffect.
+  }, [sceneState.scene]); // Dependency on sceneState.scene to ensure worker is ready
+
+
+  // Custom debounce hook for slicing parameters
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedSlicingParams(slicingParams);
+    }, 200); // Debounce delay: 200ms
+
+    return () => {
+      clearTimeout(handler);
+    };
+  }, [slicingParams]);
+
 
   // --- 4. UI Controls Handlers ---
   const handleSliceHeightChange = (e) => {
@@ -57,6 +148,12 @@ const STLViewer = ({ stlFile }) => {
     }));
   };
 
+  // Handler for model outline visibility
+  const handleToggleModelOutline = () => {
+    setShowModelOutline(prev => !prev);
+  };
+
+
   // --- 2. Scene Setup and Render ---
   useEffect(() => {
     const mount = mountRef.current;
@@ -72,7 +169,7 @@ const STLViewer = ({ stlFile }) => {
     const camera = new THREE.PerspectiveCamera(75, mount.clientWidth / mount.clientHeight, 0.1, 1000);
     camera.position.set(0, 0, 100);
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    const renderer = new THREE.WebGLRenderer({ antialias: true }); // Enable anti-aliasing
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     mount.appendChild(renderer.domElement);
@@ -109,7 +206,7 @@ const STLViewer = ({ stlFile }) => {
       controls.dispose();
       renderer.dispose();
     };
-  }, []);
+  }, []); // Empty dependency array means this runs once on mount
 
   // --- 1. STL Loader & Mesh Setup ---
   useEffect(() => {
@@ -129,13 +226,38 @@ const STLViewer = ({ stlFile }) => {
       mesh.name = "stlMesh";
 
       const scene = sceneState.scene;
-      const existing = scene.getObjectByName("stlMesh");
-      if (existing) {
-        scene.remove(existing);
-        if (existing.geometry) existing.geometry.dispose();
-        if (existing.material) existing.material.dispose();
+      const existingMesh = scene.getObjectByName("stlMesh");
+      if (existingMesh) {
+        scene.remove(existingMesh);
+        if (existingMesh.geometry) existingMesh.geometry.dispose();
+        if (existingMesh.material) existingMesh.material.dispose();
       }
       scene.add(mesh);
+
+      // --- Add Model Outline Logic ---
+      const existingOutline = scene.getObjectByName("modelOutline");
+      if (existingOutline) {
+        scene.remove(existingOutline);
+        if (existingOutline.geometry) existingOutline.geometry.dispose();
+        if (existingOutline.material) existingOutline.material.dispose();
+      }
+
+      // Create EdgesGeometry for clean outlines
+      const edges = new THREE.EdgesGeometry(loadedGeometry, 30); // Threshold angle 30 degrees
+      const outlineMaterial = new THREE.LineBasicMaterial({
+        color: 0x000000, // Black outlines
+        linewidth: 2, // Note: linewidth often ignored by WebGL, usually renders as 1px
+        transparent: true,
+        opacity: 0.8,
+        depthTest: true,  // Crucial: only draw if in front of existing geometry
+        depthWrite: false // Crucial: don't write to depth buffer, allows mesh to obscure lines behind it
+      });
+      const modelOutlines = new THREE.LineSegments(edges, outlineMaterial);
+      modelOutlines.name = "modelOutline";
+      modelOutlines.visible = showModelOutline; // Control visibility based on state
+      scene.add(modelOutlines);
+      // --- End Model Outline Logic ---
+
 
       if (sceneState.camera && sceneState.controls) {
         const size = new THREE.Vector3();
@@ -150,47 +272,64 @@ const STLViewer = ({ stlFile }) => {
         sceneState.controls.update();
       }
 
-      clearSlices(scene);
-      if (slicingParams.showSlices) {
-         let sliceValueToRender = null;
-         if (slicingParams.singleSliceMode) {
-           sliceValueToRender = slicingParams.currentSlice;
-         }
-         const segments = getSliceSegments(
-           loadedGeometry,
-           slicingParams.sliceHeight,
-           sliceValueToRender,
-           slicingParams.slicingPlane
-         );
-         renderSlicesWithClipper(segments, scene, slicingParams.slicingPlane);
-      }
+      // Trigger slicing via worker after geometry is loaded
+      // The actual slicing logic will be triggered by the debouncedSlicingParams useEffect
+      // and sent to the worker.
     },
     undefined,
     (error) => {
       console.error("Error loading STL file:", error);
-      alert("Error loading STL file. Please check the file and try again.");
+      // Using console.log instead of alert() as per instructions
+      console.log("Error loading STL file. Please check the file and try again.");
     });
-  }, [stlFile, sceneState.scene, sceneState.camera, sceneState.controls, slicingParams.singleSliceMode, slicingParams.currentSlice, slicingParams.sliceHeight, slicingParams.slicingPlane, slicingParams.showSlices]);
+  }, [stlFile, sceneState.scene, sceneState.camera, sceneState.controls, showModelOutline]); // Add showModelOutline to dependencies
 
-  // --- Re-slice when slicingParams change (if geometry exists) ---
+
+  // --- Effect to update model outline visibility when showModelOutline changes ---
   useEffect(() => {
-    if (geometry && sceneState.scene) {
-      clearSlices(sceneState.scene);
-      if (slicingParams.showSlices) {
-        let sliceValueToRender = null;
-        if (slicingParams.singleSliceMode) {
-          sliceValueToRender = slicingParams.currentSlice;
-        }
-        const segments = getSliceSegments(
-          geometry,
-          slicingParams.sliceHeight,
-          sliceValueToRender,
-          slicingParams.slicingPlane
-        );
-        renderSlicesWithClipper(segments, sceneState.scene, slicingParams.slicingPlane);
+    if (sceneState.scene) {
+      const modelOutline = sceneState.scene.getObjectByName("modelOutline");
+      if (modelOutline) {
+        modelOutline.visible = showModelOutline;
       }
     }
-  }, [slicingParams.sliceHeight, slicingParams.showSlices, slicingParams.currentSlice, slicingParams.singleSliceMode, slicingParams.slicingPlane, geometry, sceneState.scene]);
+  }, [showModelOutline, sceneState.scene]);
+
+
+  // --- Send slicing request to worker when debounced params or geometry change ---
+  useEffect(() => {
+    if (geometry && sceneState.scene && workerInstanceRef.current) {
+      clearSlices(sceneState.scene); // Clear old slices immediately
+      if (debouncedSlicingParams.showSlices) {
+        let sliceValueToRender = null;
+        if (debouncedSlicingParams.singleSliceMode) {
+          sliceValueToRender = debouncedSlicingParams.currentSlice;
+        }
+
+        // Prepare data for the worker (transferable objects like Float32Array)
+        // CRITICAL FIX: Create a NEW Float32Array to send a COPY of the buffer
+        // By NOT including positionArrayCopy.buffer in the transfer list,
+        // postMessage will perform a structured clone (copy) instead of a transfer.
+        // This keeps the original geometry's buffer intact on the main thread.
+        const positionArrayCopy = new Float32Array(geometry.attributes.position.array);
+        const bboxData = {
+          min: geometry.boundingBox.min.toArray(),
+          max: geometry.boundingBox.max.toArray(),
+        };
+
+        workerInstanceRef.current.postMessage({
+          type: 'sliceModel',
+          payload: {
+            positionArray: positionArrayCopy, // Send the copy
+            bboxData: bboxData,
+            sliceHeight: debouncedSlicingParams.sliceHeight,
+            currentSlice: sliceValueToRender,
+            slicingPlane: debouncedSlicingParams.slicingPlane,
+          }
+        }); // Removed the transfer list argument
+      }
+    }
+  }, [debouncedSlicingParams, geometry, sceneState.scene]); // Depends on debounced state and geometry
 
   // --- 6. Utility Functions ---
   const clearSlices = (scene) => {
@@ -202,238 +341,101 @@ const STLViewer = ({ stlFile }) => {
     });
   };
 
-  /**
-   * getSliceSegments
-   * Extracts raw intersection points (segments) for each slice plane.
-   * This function focuses only on finding the intersections, not on contour reconstruction.
-   * @param {THREE.BufferGeometry} geometry The geometry to slice.
-   * @param {number} heightStep The height between slices.
-   * @param {number | null} currentSliceVal If not null, only slice at this specific value.
-   * @param {'X' | 'Y' | 'Z'} plane The slicing plane (e.g., 'Z' for XY slices).
-   * @returns {Array<{ value: number, segments: Array<Array<THREE.Vector3>> }>} An array of objects,
-   * each containing the slice plane value and its raw segments.
-   */
-  const getSliceSegments = (geometry, heightStep, currentSliceVal, plane) => {
-    const pos = geometry.attributes.position;
-    const bbox = geometry.boundingBox;
-    const slicesData = [];
-
-    if (!bbox) {
-      console.warn("Bounding box not computed for geometry. Cannot slice.");
-      return slicesData;
-    }
-
-    let axis;
-    let min, max;
-    if (plane === "Z") {
-      axis = "z";
-      min = bbox.min.z;
-      max = bbox.max.z;
-    } else if (plane === "X") {
-      axis = "x";
-      min = bbox.min.x;
-      max = bbox.max.x;
-    } else {
-      axis = "y";
-      min = bbox.min.y;
-      max = bbox.max.y;
-    }
-
-    const valuesToSlice =
-      currentSliceVal !== null
-        ? [currentSliceVal]
-        : Array.from({ length: Math.floor((max - min) / heightStep) + 1 }, (_, i) => min + i * heightStep);
-
-    const p1 = new THREE.Vector3();
-    const p2 = new THREE.Vector3();
-    const p3 = new THREE.Vector3();
-
-    const epsilon = 1e-6; // Epsilon for floating point comparisons
-
-    valuesToSlice.forEach((value) => {
-      const segmentsForCurrentSlice = [];
-
-      for (let i = 0; i < pos.count; i += 3) {
-        p1.fromBufferAttribute(pos, i);
-        p2.fromBufferAttribute(pos, i + 1);
-        p3.fromBufferAttribute(pos, i + 2);
-
-        const triangle = [p1, p2, p3];
-        const currentTriangleIntersectionPoints = [];
-
-        for (let j = 0; j < 3; j++) {
-          const v1 = triangle[j];
-          const v2 = triangle[(j + 1) % 3];
-
-          const val1 = v1[axis];
-          const val2 = v2[axis];
-
-          if (
-            (val1 <= value + epsilon && val2 >= value - epsilon) ||
-            (val2 <= value + epsilon && val1 >= value - epsilon)
-          ) {
-            if (Math.abs(val2 - val1) < epsilon) { // Edge is co-planar or degenerate
-              continue;
-            }
-
-            const t = (value - val1) / (val2 - val1);
-            const intersectPoint = new THREE.Vector3().lerpVectors(v1, v2, t);
-            currentTriangleIntersectionPoints.push(intersectPoint);
-          }
-        }
-
-        if (currentTriangleIntersectionPoints.length === 2) {
-          // Filter out degenerate segments (points too close)
-          if (currentTriangleIntersectionPoints[0].distanceTo(currentTriangleIntersectionPoints[1]) > epsilon) {
-            segmentsForCurrentSlice.push(currentTriangleIntersectionPoints);
-          }
-        }
-      }
-      if (segmentsForCurrentSlice.length > 0) {
-        slicesData.push({ value: value, segments: segmentsForCurrentSlice });
-      }
-    });
-    return slicesData;
-  };
-
-  /**
-   * renderSlicesWithClipper
-   * Renders the slice contours using js-clipper for robust polygon reconstruction.
-   * @param {Array<{ value: number, segments: Array<Array<THREE.Vector3>> }>} slicesData Data for each slice plane.
-   * @param {THREE.Scene} scene The Three.js scene to add lines to.
-   * @param {'X' | 'Y' | 'Z'} plane The slicing plane, used for projection.
-   */
-  const renderSlicesWithClipper = (slicesData, scene, plane) => {
-    const CL_SCALE = 10000000; // Increased scale factor for ClipperLib (10 million)
-
-    slicesData.forEach(sliceData => {
-      const { value: slicePlaneValue, segments: rawSegments } = sliceData;
-
-      const clipper = new ClipperLib.Clipper();
-      const subjectPaths = new ClipperLib.Paths();
-
-      rawSegments.forEach(segment => {
-        const p1 = segment[0];
-        const p2 = segment[1];
-
-        let x1, y1, x2, y2;
-
-        if (plane === "Z") {
-          x1 = p1.x; y1 = p1.y;
-          x2 = p2.x; y2 = p2.y;
-        } else if (plane === "X") {
-          x1 = p1.y; y1 = p1.z;
-          x2 = p2.y; y2 = p2.z;
-        } else { // Y plane
-          x1 = p1.x; y1 = p1.z;
-          x2 = p2.x; y2 = p2.z;
-        }
-
-        const intP1 = { X: Math.round(x1 * CL_SCALE), Y: Math.round(y1 * CL_SCALE) };
-        const intP2 = { X: Math.round(x2 * CL_SCALE), Y: Math.round(y2 * CL_SCALE) };
-
-        // ClipperLib.AddPath expects a single path. Each segment is treated as a path.
-        const path = new ClipperLib.Path();
-        path.push(intP1);
-        path.push(intP2);
-        subjectPaths.push(path);
-      });
-
-      const solutionPolyTree = new ClipperLib.PolyTree();
-      try {
-        const success = clipper.Execute(
-          ClipperLib.ClipType.ctUnion,
-          solutionPolyTree,
-          ClipperLib.PolyFillType.pftNonZero,
-          ClipperLib.PolyFillType.pftNonZero
-        );
-
-        if (!success) {
-          console.warn(`ClipperLib Execute failed for slice at value: ${slicePlaneValue}. Input segments:`, rawSegments);
-          // Optionally, if ClipperLib fails, you might fall back to rendering raw segments for this slice
-          // or simply skip rendering this slice. For now, it will just warn and skip.
-          return;
-        }
-      } catch (e) {
-        console.error(`ClipperLib threw an error for slice at value: ${slicePlaneValue}. Error:`, e, 'Input segments:', rawSegments);
-        return;
-      }
-
-
-      const solutionPaths = ClipperLib.Clipper.PolyTreeToPaths(solutionPolyTree);
-
-      solutionPaths.forEach(path => {
-        if (path.length < 2) return;
-
-        const threeJsPoints = [];
-        path.forEach(intPoint => {
-          const x = intPoint.X / CL_SCALE;
-          const y = intPoint.Y / CL_SCALE;
-
-          let threeDPoint;
-          if (plane === "Z") {
-            threeDPoint = new THREE.Vector3(x, y, slicePlaneValue);
-          } else if (plane === "X") {
-            threeDPoint = new THREE.Vector3(slicePlaneValue, x, y);
-          } else {
-            threeDPoint = new THREE.Vector3(x, slicePlaneValue, y);
-          }
-          threeJsPoints.push(threeDPoint);
-        });
-
-        if (threeJsPoints.length > 1) {
-          const sliceGeometry = new THREE.BufferGeometry().setFromPoints(threeJsPoints.concat(threeJsPoints[0]));
-          const sliceMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 });
-          const sliceLine = new THREE.LineLoop(sliceGeometry, sliceMaterial);
-          sliceLine.name = "sliceLine";
-          scene.add(sliceLine);
-        }
-      });
-    });
-  };
-
   // --- 5. Export Functions ---
   const exportSVG = () => {
     if (!sceneState.scene) return;
     const lines = sceneState.scene.children.filter((child) => child.name === "sliceLine");
-    if (lines.length === 0) return alert("No slices to export.");
+    if (lines.length === 0) return console.log("No slices to export."); // Using console.log instead of alert()
 
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    let currentXOffset = 0;
+    let overallMinX = Infinity;
+    let overallMinY = Infinity;
+    let overallMaxX = -Infinity;
+    let overallMaxY = -Infinity;
 
-    let svgPaths = "";
+    const slicesToExport = []; // Store processed slice data for export
+
     lines.forEach((line) => {
       const pos = line.geometry.attributes.position;
-      let pathD = "";
-      for (let i = 0; i < pos.count; i++) {
-        const x = pos.getX(i);
-        const y = pos.getY(i);
-        const z = pos.getZ(i);
+      const segmentsForThisSlice = [];
+      let sliceMinX = Infinity, sliceMinY = Infinity, sliceMaxX = -Infinity, sliceMaxY = -Infinity;
 
-        let px, py;
+      for (let i = 0; i < pos.count; i += 2) {
+        const p1x = pos.getX(i);
+        const p1y = pos.getY(i);
+        const p1z = pos.getZ(i);
+
+        if (i + 1 >= pos.count) continue;
+        
+        const p2x = pos.getX(i + 1);
+        const p2y = pos.getY(i + 1);
+        const p2z = pos.getZ(i + 1);
+
+        let px1, py1, px2, py2;
+
+        // Project 3D points to 2D plane based on slicingPlane
         if (slicingParams.slicingPlane === "Z") {
-          px = x;
-          py = y;
+          px1 = p1x; py1 = p1y;
+          px2 = p2x; py2 = p2y;
         } else if (slicingParams.slicingPlane === "X") {
-          px = z;
-          py = y;
-        } else {
-          px = x;
-          py = z;
+          px1 = p1z; py1 = p1y; // X-plane, so use Z and Y coordinates
+          px2 = p2z; py2 = p2y;
+        } else { // Y plane
+          px1 = p1x; py1 = p1z; // Y-plane, so use X and Z coordinates
+          px2 = p2x; py2 = p2z;
         }
 
-        minX = Math.min(minX, px);
-        minY = Math.min(minY, py);
-        maxX = Math.max(maxX, px);
-        maxY = Math.max(maxY, py);
+        sliceMinX = Math.min(sliceMinX, px1, px2);
+        sliceMinY = Math.min(sliceMinY, py1, py2);
+        sliceMaxX = Math.max(sliceMaxX, px1, px2);
+        sliceMaxY = Math.max(sliceMaxY, py1, py2);
 
-        pathD += i === 0 ? `M ${px.toFixed(3)} ${(-py).toFixed(3)}` : ` L ${px.toFixed(3)} ${(-py).toFixed(3)}`;
+        segmentsForThisSlice.push({ p1: [px1, py1], p2: [px2, py2] });
       }
-      pathD += " Z";
 
-      svgPaths += `<path d="${pathD}" stroke="red" stroke-width="0.05" fill="none"/>`;
+      if (segmentsForThisSlice.length > 0) {
+        const sliceWidth = sliceMaxX - sliceMinX;
+        const sliceHeight = sliceMaxY - sliceMinY;
+
+        slicesToExport.push({
+          segments: segmentsForThisSlice,
+          color: line.material.color.getHexString(),
+          offsetX: currentXOffset,
+          offsetY: 0, // For a single row layout
+          sliceMinX: sliceMinX, // Original min X for this slice
+          sliceMinY: sliceMinY, // Original min Y for this slice
+          sliceHeight: sliceHeight // Height of this slice
+        });
+
+        // Update overall bounding box for viewBox calculation
+        overallMinX = Math.min(overallMinX, currentXOffset + sliceMinX);
+        overallMaxX = Math.max(overallMaxX, currentXOffset + sliceMaxX);
+        overallMinY = Math.min(overallMinY, sliceMinY); // No offsetY for Y bounds
+        overallMaxY = Math.max(overallMaxY, sliceMaxY); // No offsetY for Y bounds
+
+        currentXOffset += sliceWidth + 10; // Add 10mm spacing
+      }
     });
 
-    const viewBoxString = `${minX.toFixed(3)} ${(-maxY).toFixed(3)} ${(maxX - minX).toFixed(3)} ${(maxY - minY).toFixed(3)}`;
+    let svgPaths = "";
+    slicesToExport.forEach(sliceData => {
+      sliceData.segments.forEach(segment => {
+        const px1 = segment.p1[0] + sliceData.offsetX;
+        const py1 = segment.p1[1] + sliceData.offsetY;
+        const px2 = segment.p2[0] + sliceData.offsetX;
+        const py2 = segment.p2[1] + sliceData.offsetY;
+
+        svgPaths += `<path d="M ${px1.toFixed(3)} ${(-py1).toFixed(3)} L ${px2.toFixed(3)} ${(-py2).toFixed(3)}" stroke="#${sliceData.color}" stroke-width="0.05" fill="none"/>`;
+      });
+    });
+
+    // Calculate final viewBox based on overall min/max
+    const finalViewBoxMinX = overallMinX;
+    const finalViewBoxMinY = -overallMaxY; // Invert Y for SVG viewBox
+    const finalViewBoxWidth = overallMaxX - overallMinX;
+    const finalViewBoxHeight = overallMaxY - overallMinY;
+
+    const viewBoxString = `${finalViewBoxMinX.toFixed(3)} ${finalViewBoxMinY.toFixed(3)} ${finalViewBoxWidth.toFixed(3)} ${finalViewBoxHeight.toFixed(3)}`;
 
     const svgContent = `<?xml version="1.0" standalone="no"?>
 <svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="${viewBoxString}">
@@ -447,38 +449,81 @@ ${svgPaths}
   const exportDXF = () => {
     if (!sceneState.scene) return;
     const lines = sceneState.scene.children.filter((child) => child.name === "sliceLine");
-    if (lines.length === 0) return alert("No slices to export.");
+    if (lines.length === 0) return console.log("No slices to export."); // Using console.log instead of alert()
 
-    let dxfContent = "0\nSECTION\n2\nENTITIES\n";
+    let currentXOffset = 0;
+    const slicesToExport = []; // Store processed slice data for export
+
     lines.forEach((line) => {
       const pos = line.geometry.attributes.position;
-      for (let i = 0; i < pos.count; i++) {
+      const segmentsForThisSlice = [];
+      let sliceMinX = Infinity, sliceMaxX = -Infinity; // Only need X for width calculation
+
+      for (let i = 0; i < pos.count; i += 2) { // Iterate by 2 for start and end of each segment
         const p1x = pos.getX(i);
         const p1y = pos.getY(i);
         const p1z = pos.getZ(i);
 
-        const nextIndex = (i + 1) % pos.count;
-        const p2x = pos.getX(nextIndex);
-        const p2y = pos.getY(nextIndex);
-        const p2z = pos.getZ(nextIndex);
+        // Ensure there's a second point for the segment
+        if (i + 1 >= pos.count) continue; 
+        
+        const p2x = pos.getX(i + 1);
+        const p2y = pos.getY(i + 1);
+        const p2z = pos.getZ(i + 1);
 
         let dx1, dy1, dz1;
         let dx2, dy2, dz2;
 
+        // Project 3D points to 2D plane for DXF
         if (slicingParams.slicingPlane === "Z") {
           dx1 = p1x; dy1 = p1y; dz1 = 0;
           dx2 = p2x; dy2 = p2y; dz2 = 0;
         } else if (slicingParams.slicingPlane === "X") {
-          dx1 = p1z; dy1 = p1y; dz1 = 0;
+          dx1 = p1z; dy1 = p1y; dz1 = 0; // X-plane, so use Z and Y coordinates
           dx2 = p2z; dy2 = p2y; dz2 = 0;
-        } else {
-          dx1 = p1x; dy1 = p1z; dz1 = 0;
+        } else { // Y plane
+          dx1 = p1x; dy1 = p1z; dz1 = 0; // Y-plane, so use X and Z coordinates
           dx2 = p2x; dy2 = p2z; dz2 = 0;
         }
 
+        sliceMinX = Math.min(sliceMinX, dx1, dx2);
+        sliceMaxX = Math.max(sliceMaxX, dx1, dx2);
+
+        segmentsForThisSlice.push({ p1: [dx1, dy1, dz1], p2: [dx2, dy2, dz2] });
+      }
+
+      if (segmentsForThisSlice.length > 0) {
+        const sliceWidth = sliceMaxX - sliceMinX;
+
+        slicesToExport.push({
+          segments: segmentsForThisSlice,
+          offsetX: currentXOffset,
+          offsetY: 0 // For a single row layout
+        });
+
+        currentXOffset += sliceWidth + 10; // Add 10mm spacing
+      }
+    });
+
+    let dxfContent = "0\nSECTION\n2\nENTITIES\n";
+    slicesToExport.forEach(sliceData => {
+      sliceData.segments.forEach(segment => {
+        const p1 = segment.p1;
+        const p2 = segment.p2;
+
+        // Apply offset to X coordinate
+        const dx1 = p1[0] + sliceData.offsetX;
+        const dy1 = p1[1];
+        const dz1 = p1[2];
+
+        const dx2 = p2[0] + sliceData.offsetX;
+        const dy2 = p2[1];
+        const dz2 = p2[2];
+        
+        // Add a LINE entity for each segment
         dxfContent +=
           `0\nLINE\n8\n0\n10\n${dx1.toFixed(3)}\n20\n${dy1.toFixed(3)}\n30\n${dz1.toFixed(3)}\n11\n${dx2.toFixed(3)}\n21\n${dy2.toFixed(3)}\n31\n${dz2.toFixed(3)}\n`;
-      }
+      });
     });
     dxfContent += "0\nENDSEC\n0\nEOF";
 
@@ -541,6 +586,16 @@ ${svgPaths}
         </label>
 
         <label style={{ marginLeft: 20 }}>
+          <input
+            type="checkbox"
+            checked={showModelOutline} // Use new state
+            onChange={handleToggleModelOutline} // New handler
+            style={{ marginRight: 5 }}
+          />
+          Show Model Outline {/* New UI label */}
+        </label>
+
+        <label style={{ marginLeft: 20 }}>
           Plane:
           <select value={slicingParams.slicingPlane} onChange={handlePlaneChange} style={{ marginLeft: 5, padding: 3 }}>
             <option value="Z">Z</option>
@@ -596,3 +651,5 @@ ${svgPaths}
     </div>
   );
 };
+
+export default STLViewer;
