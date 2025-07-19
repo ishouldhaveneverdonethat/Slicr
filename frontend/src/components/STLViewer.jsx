@@ -301,39 +301,40 @@ const STLViewer = ({ stlFile }) => {
   ---------------------------------------------------------- */
 const exportSVG = () => {
   if (!sceneState.scene) return;
-  const lines = sceneState.scene.children.filter((c) => c.name === "sliceLine");
-  if (!lines.length) return console.log("No slices to export.");
+  const lines = sceneState.scene.children.filter((c) => c.name === 'sliceLine');
+  if (!lines.length) return console.log('No slices to export.');
 
+  const plane = slicingParams.slicingPlane; // 'X', 'Y', or 'Z'
   let offsetX = 0;
-  let globalMinX = Infinity,
-    globalMinY = Infinity,
-    globalMaxX = -Infinity,
-    globalMaxY = -Infinity;
-  const sliceGap = 10; // 10 mm horizontal gap between slices
-  let pathStrings = "";
+  let globalMinX = Infinity;
+  let globalMinY = Infinity;
+  let globalMaxX = -Infinity;
+  let globalMaxY = -Infinity;
+  const sliceGap = 10; // mm between slices
+
+  let pathData = '';
 
   lines.forEach((line) => {
     const pos = line.geometry.attributes.position;
-    if (!pos || !pos.count) return;
+    if (!pos || !pos.count === 0) return;
 
-    // projected bounds for THIS slice
-    let sliceMinX = Infinity,
-      sliceMinY = Infinity,
-      sliceMaxX = -Infinity,
-      sliceMaxY = -Infinity;
+    // --- slice-local bounds & projected 2-D points ---------------
+    let minX = Infinity,
+      maxX = -Infinity,
+      minY = Infinity,
+      maxY = -Infinity;
+    const flat = [];
 
-    // collect projected 2-D points
-    const projected = [];
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i);
       const y = pos.getY(i);
       const z = pos.getZ(i);
 
-      let px, py;
-      if (slicingParams.slicingPlane === "Z") {
+      let px, py; // 2-D projection
+      if (plane === 'Z') {
         px = x;
         py = y;
-      } else if (slicingParams.slicingPlane === "X") {
+      } else if (plane === 'X') {
         px = z;
         py = y;
       } else {
@@ -341,67 +342,94 @@ const exportSVG = () => {
         px = x;
         py = z;
       }
-      projected.push(px, py);
 
-      sliceMinX = Math.min(sliceMinX, px);
-      sliceMaxX = Math.max(sliceMaxX, px);
-      sliceMinY = Math.min(sliceMinY, py);
-      sliceMaxY = Math.max(sliceMaxY, py);
+      flat.push(px + offsetX, -py); // SVG Y is inverted
+      minX = Math.min(minX, px);
+      maxX = Math.max(maxX, px);
+      minY = Math.min(minY, py);
+      maxY = Math.max(maxY, py);
     }
 
-    if (projected.length === 0) return;
-
-    // build path
-    const pts = [];
-    for (let i = 0; i < projected.length; i += 2) {
-      pts.push(projected[i] + offsetX, -projected[i + 1]); // SVG Y is inverted
+    if (flat.length) {
+      pathData += `<path d="M ${flat.join(' L ')}" stroke="#ff0000" stroke-width="0.2" fill="none"/>\n`;
     }
-    pathStrings += `<path d="M ${pts.join(" L ")}" stroke="#ff0000" stroke-width="0.2" fill="none" />\n`;
 
-    // update global bounds
-    globalMinX = Math.min(globalMinX, offsetX + sliceMinX);
-    globalMaxX = Math.max(globalMaxX, offsetX + sliceMaxX);
-    globalMinY = Math.min(globalMinY, -sliceMaxY);
-    globalMaxY = Math.max(globalMaxY, -sliceMinY);
+    // update global viewport
+    globalMinX = Math.min(globalMinX, offsetX + minX);
+    globalMaxX = Math.max(globalMaxX, offsetX + maxX);
+    globalMinY = Math.min(globalMinY, -maxY);
+    globalMaxY = Math.max(globalMaxY, -minY);
 
-    // move horizontal offset for next slice
-    offsetX += sliceMaxX - sliceMinX + sliceGap;
+    offsetX += maxX - minX + sliceGap;
   });
 
-  if (!pathStrings) return;
+  if (!pathData) return;
 
-  const width = globalMaxX - globalMinX;
-  const height = globalMaxY - globalMinY;
+  const w = globalMaxX - globalMinX;
+  const h = globalMaxY - globalMinY;
   const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg"
-     viewBox="${globalMinX.toFixed(3)} ${globalMinY.toFixed(3)} ${width.toFixed(3)} ${height.toFixed(3)}">
-  ${pathStrings}
+     viewBox="${globalMinX.toFixed(3)} ${globalMinY.toFixed(3)} ${w.toFixed(3)} ${h.toFixed(3)}">
+${pathData}
 </svg>`;
-
-  saveAs(new Blob([svg], { type: "image/svg+xml" }), "slice.svg");
+  saveAs(new Blob([svg], { type: 'image/svg+xml' }), 'slice.svg');
 };
 
-/* ----------------------------------------------------------
-   DXF Export (fixed)
----------------------------------------------------------- */
+/* ------------------------------------------------------------------
+   2. DXF Export – side view, one row
+------------------------------------------------------------------ */
 const exportDXF = () => {
   if (!sceneState.scene) return;
-  const lines = sceneState.scene.children.filter((c) => c.name === "sliceLine");
-  if (!lines.length) return console.log("No slices to export.");
+  const lines = sceneState.scene.children.filter((c) => c.name === 'sliceLine');
+  if (!lines.length) return console.log('No slices to export.');
 
-  let dxf = "0\nSECTION\n2\nENTITIES\n";
+  const plane = slicingParams.slicingPlane;
+  let offsetX = 0;
+  const sliceGap = 10;
+
+  let dxf = '0\nSECTION\n2\nENTITIES\n';
+
   lines.forEach((line) => {
     const pos = line.geometry.attributes.position;
-    for (let i = 0; i < pos.count; i += 2) {
-      const p1 = { x: pos.getX(i), y: pos.getY(i), z: 0 };
-      const p2 = { x: pos.getX(i + 1), y: pos.getY(i + 1), z: 0 };
-      dxf += `0\nLINE\n8\n0\n10\n${p1.x}\n20\n${p1.y}\n30\n${p1.z}\n11\n${p2.x}\n21\n${p2.y}\n31\n${p2.z}\n`;
-    }
-  });
-  dxf += "0\nENDSEC\n0\nEOF";
-  saveAs(new Blob([dxf], { type: "application/dxf" }), "slice.dxf");
-};
+    if (!pos || !pos.count === 0) return;
 
+    let minX = Infinity,
+      maxX = -Infinity;
+    const pts2D = [];
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      const z = pos.getZ(i);
+
+      let px, py;
+      if (plane === 'Z') {
+        px = x;
+        py = y;
+      } else if (plane === 'X') {
+        px = z;
+        py = y;
+      } else {
+        px = x;
+        py = z;
+      }
+      pts2D.push({ x: px + offsetX, y: py });
+      minX = Math.min(minX, px);
+      maxX = Math.max(maxX, px);
+    }
+
+    // write as 2-D DXF lines (Z=0)
+    for (let i = 0; i < pts2D.length - 1; i++) {
+      const p1 = pts2D[i];
+      const p2 = pts2D[i + 1];
+      dxf += `0\nLINE\n8\n0\n10\n${p1.x}\n20\n${p1.y}\n30\n0\n11\n${p2.x}\n21\n${p2.y}\n31\n0\n`;
+    }
+
+    offsetX += maxX - minX + sliceGap;
+  }
+
+  dxf += '0\nENDSEC\n0\nEOF';
+  saveAs(new Blob([dxf], { type: 'application/dxf' }), 'slice.dxf');
+};
   /* ----------------------------------------------------------
      10.  Slicing trigger (debounced)
   ---------------------------------------------------------- */
