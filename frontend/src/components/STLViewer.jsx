@@ -141,7 +141,7 @@ const STLViewer = ({ stlFile }) => {
       showSlices: true,
     }));
     setShowMiddleSlice(false);
-  }, [geometry, slicingParams.sliceHeight, slicingParams.slicingPlane, currentScale, getScaledMinRangeValue, setShowMiddleSlice]); // Explicitly list all dependencies
+  }, [geometry, slicingParams.sliceHeight, slicingParams.slicingPlane, currentScale, getScaledMinRangeValue]); // Removed setShowMiddleSlice from dependencies
 
   const handleToggleSingleSliceMode = useCallback(() => {
     setSlicingParams((p) => ({
@@ -408,7 +408,7 @@ const STLViewer = ({ stlFile }) => {
         modelOutline.visible = showModelOutline; // Respect outline checkbox
       }
     }
-  }, [showModelOutline]); // showMiniViewer removed from deps
+  }, [showModelOutline]);
 
   // --- Send slicing request to worker ---
   useEffect(() => {
