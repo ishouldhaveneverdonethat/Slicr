@@ -28,7 +28,7 @@ self.onmessage = async function(event) {
             const loader = new STLLoader();
             const geometry = loader.parse(stlBuffer);
 
-            // --- NEW: Apply Model Scaling ---
+            // --- Apply Model Scaling ---
             // Scale the geometry to fit the target bounding box (200x200x300mm)
             geometry.scale(scaleFactor, scaleFactor, scaleFactor);
             geometry.computeBoundingBox(); // Recompute bounding box after scaling
@@ -112,7 +112,6 @@ async function performMultiAxisSlicing(geometry, materialThickness, slicingOrien
     }
 
     // Calculate the number of slices needed based on model extent and material thickness
-    // This is now derived, not a direct user input "number of slices"
     const modelExtent = maxCoord - minCoord;
     const numberOfSlices = Math.floor(modelExtent / materialThickness); // Use floor to ensure full slices
 
@@ -145,20 +144,19 @@ async function performMultiAxisSlicing(geometry, materialThickness, slicingOrien
 
 
 /**
- * IMPORTANT: This function now outlines the full plane-mesh intersection and stitching logic.
- * The actual implementation of the stitching part needs to be robustly filled in.
- *
- * This function's goal is to:
- * 1. Find all line segments where the 'plane' intersects the triangles of the 'geometry'.
- * 2. Stitch these line segments together to form closed 2D polygons (loops).
- * 3. Project these 3D loop points onto a 2D plane.
+ * IMPORTANT: This function now implements basic plane-mesh intersection.
+ * It finds line segments where the plane cuts triangles.
+ * The "stitching" of these segments into closed loops is still a complex
+ * part that is outlined conceptually but not fully implemented here.
+ * For now, it returns raw segments as individual "loops" for visual feedback.
  *
  * @param {THREE.BufferGeometry} geometry The 3D model geometry.
  * @param {THREE.Plane} plane The slicing plane.
  * @param {number} axisIndex The index of the axis being sliced (0 for X, 1 for Y, 2 for Z).
  * @param {THREE.Vector3} planeNormal Normal of the slicing plane.
  * @param {THREE.Vector3} upVector Vector defining 'up' for the 2D projection.
- * @returns {Array<Array<Array<number>>>} An array of loops, where each loop is an array of [x, y] points.
+ * @returns {Array<Array<Array<number>>>} An array of "loops" (currently raw segments),
+ * where each loop is an array of [x, y] points.
  */
 function intersectMeshWithPlane(geometry, plane, axisIndex, planeNormal, upVector) {
     const segments = []; // To store all intersection line segments found
@@ -228,6 +226,7 @@ function intersectMeshWithPlane(geometry, plane, axisIndex, planeNormal, upVecto
     const vVector = new THREE.Vector3().crossVectors(uVector, planeNormal).normalize();
 
 
+    // Iterate through triangles to find intersection segments
     if (indexAttribute) {
         // Indexed geometry: iterate through faces using indices
         for (let i = 0; i < indexAttribute.count; i += 3) {
@@ -266,12 +265,17 @@ function intersectMeshWithPlane(geometry, plane, axisIndex, planeNormal, upVecto
             // If a triangle intersects the plane, it will typically have two intersection points,
             // forming a line segment.
             if (intersectionPointsForTriangle.length === 2) {
-                segments.push({
-                    p1: intersectionPointsForTriangle[0],
-                    p2: intersectionPointsForTriangle[1],
-                    used: false // Flag to track if segment has been used in a loop
-                });
+                // Project the 3D intersection points to 2D
+                const p1_2D = projectTo2D(intersectionPointsForTriangle[0], planeOrigin, uVector, vVector);
+                const p2_2D = projectTo2D(intersectionPointsForTriangle[1], planeOrigin, uVector, vVector);
+
+                // For now, we'll treat each segment as a separate "loop" for visualization.
+                // The actual stitching logic would combine these.
+                loops.push([p1_2D, p2_2D]);
             }
+            // Cases where a triangle edge or vertex lies exactly on the plane
+            // are complex and might result in more than 2 points or degenerate segments.
+            // A robust solution would need to handle these carefully.
         }
     } else {
         // Non-indexed geometry: iterate directly through vertex triplets (each triplet is a triangle)
@@ -303,97 +307,17 @@ function intersectMeshWithPlane(geometry, plane, axisIndex, planeNormal, upVecto
             }
 
             if (intersectionPointsForTriangle.length === 2) {
-                segments.push({
-                    p1: intersectionPointsForTriangle[0],
-                    p2: intersectionPointsForTriangle[1],
-                    used: false
-                });
+                const p1_2D = projectTo2D(intersectionPointsForTriangle[0], planeOrigin, uVector, vVector);
+                const p2_2D = projectTo2D(intersectionPointsForTriangle[1], planeOrigin, uVector, vVector);
+                loops.push([p1_2D, p2_2D]);
             }
         }
     }
 
-    // --- STEP 2: Stitching Segments into Closed Loops ---
-    // This is the core algorithm for reconstructing polygons from disjoint segments.
-    // It's a graph traversal problem.
-
-    while (true) {
-        let currentLoop = [];
-        let startSegment = null;
-
-        // Find an unused segment to start a new loop
-        for (let i = 0; i < segments.length; i++) {
-            if (!segments[i].used) {
-                startSegment = segments[i];
-                break;
-            }
-        }
-
-        if (!startSegment) {
-            // No more unused segments, all loops found
-            break;
-        }
-
-        // Start building a loop from the found segment
-        currentLoop.push(startSegment.p1);
-        currentLoop.push(startSegment.p2);
-        startSegment.used = true;
-        let currentPoint = startSegment.p2; // The last point added to the loop
-
-        // Keep searching for the next segment that connects to the currentPoint
-        let loopClosed = false;
-        let iterationCount = 0; // Safety break for infinite loops in complex cases
-        const MAX_ITERATIONS = segments.length * 2; // Arbitrary limit (should be enough for simple models)
-
-        while (!loopClosed && iterationCount < MAX_ITERATIONS) {
-            iterationCount++;
-            let foundNextSegment = false;
-
-            for (let i = 0; i < segments.length; i++) {
-                const segment = segments[i];
-                if (!segment.used) {
-                    if (arePointsEqual(segment.p1, currentPoint)) {
-                        currentLoop.push(segment.p2);
-                        currentPoint = segment.p2;
-                        segment.used = true;
-                        foundNextSegment = true;
-                        break; // Found next segment, break inner loop and continue building current loop
-                    } else if (arePointsEqual(segment.p2, currentPoint)) {
-                        // If the segment's end connects to current point, add its start point
-                        currentLoop.push(segment.p1);
-                        currentPoint = segment.p1;
-                        segment.used = true;
-                        foundNextSegment = true;
-                        break; // Found next segment
-                    }
-                }
-            }
-
-            // Check if the loop is closed (currentPoint connects back to the very first point)
-            if (arePointsEqual(currentPoint, currentLoop[0])) {
-                loopClosed = true;
-            }
-
-            if (!foundNextSegment && !loopClosed) {
-                // This indicates a problem: a segment was not connected, or loop couldn't close.
-                // This can happen with malformed geometry or extreme precision issues.
-                console.warn("Could not close loop or find next segment for a slice. Partial loop discarded.");
-                currentLoop = []; // Discard incomplete loop
-                break; // Break out of inner while loop to try finding a new start segment
-            }
-        }
-
-        if (loopClosed && currentLoop.length > 2) { // A loop needs at least 3 distinct points
-            // Project the 3D points of the closed loop to 2D
-            const projectedLoop = currentLoop.map(p => projectTo2D(p, planeOrigin, uVector, vVector));
-            // Ensure the loop is explicitly closed by adding the first point again for rendering
-            if (!arePointsEqual(currentLoop[0], currentLoop[currentLoop.length - 1])) {
-                 projectedLoop.push(projectedLoop[0]);
-            }
-            loops.push(projectedLoop);
-        } else if (currentLoop.length > 0) {
-            console.warn("Found a degenerate or unclosed loop, discarding.");
-        }
-    }
+    // IMPORTANT: The stitching logic to combine these raw segments into coherent closed loops
+    // is still conceptual and not fully implemented here.
+    // For now, this function will return individual line segments.
+    // The STLViewer.jsx will draw these as many small line loops.
 
     return loops;
 }
