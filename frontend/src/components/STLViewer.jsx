@@ -391,11 +391,12 @@ const exportDXF = () => {
 
   lines.forEach((line) => {
     const pos = line.geometry.attributes.position;
-    if (!pos || !pos.count === 0) return;
+    if (!pos || pos.count === 0) return;
 
-    let minX = Infinity,
-      maxX = -Infinity;
+    let minX = Infinity;
+    let maxX = -Infinity;
     const pts2D = [];
+
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i);
       const y = pos.getY(i);
@@ -412,20 +413,29 @@ const exportDXF = () => {
         px = x;
         py = z;
       }
+
       pts2D.push({ x: px + offsetX, y: py });
       minX = Math.min(minX, px);
       maxX = Math.max(maxX, px);
     }
 
-    // write as 2-D DXF lines (Z=0)
     for (let i = 0; i < pts2D.length - 1; i++) {
       const p1 = pts2D[i];
       const p2 = pts2D[i + 1];
-      dxf += `0\nLINE\n8\n0\n10\n${p1.x}\n20\n${p1.y}\n30\n0\n11\n${p2.x}\n21\n${p2.y}\n31\n0\n`;
+      dxf +=
+        '0\nLINE\n8\n0\n10\n' +
+        p1.x.toFixed(3) +
+        '\n20\n' +
+        p1.y.toFixed(3) +
+        '\n30\n0\n11\n' +
+        p2.x.toFixed(3) +
+        '\n21\n' +
+        p2.y.toFixed(3) +
+        '\n31\n0\n';
     }
 
     offsetX += maxX - minX + sliceGap;
-  }
+  });
 
   dxf += '0\nENDSEC\n0\nEOF';
   saveAs(new Blob([dxf], { type: 'application/dxf' }), 'slice.dxf');
