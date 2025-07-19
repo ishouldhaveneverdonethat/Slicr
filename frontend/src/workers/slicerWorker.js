@@ -17,16 +17,14 @@ const SNAP_TOLERANCE = 0.5; // Significantly increased tolerance for snapping po
  * @param {number} heightStep The height between slices.
  * @param {number | null} currentSliceVal If not null, only slice at this specific value.
  * @param {'X' | 'Y' | 'Z'} plane The slicing plane (e.g., 'Z' for XY slices).
- * @param {number} scaleX Scale factor for X-axis.
- * @param {number} scaleY Scale factor for Y-axis.
- * @param {number} scaleZ Scale factor for Z-axis.
  * @returns {Array<{ value: number, segments: Array<Array<number[]>> }>} An array of objects,
  * each containing the slice plane value and its raw segments (as array of [x, y, z] arrays).
  */
-function getSliceSegments(positionArray, bboxData, heightStep, currentSliceVal, plane, scaleX, scaleY, scaleZ) {
+function getSliceSegments(positionArray, bboxData, heightStep, currentSliceVal, plane) {
     const slicesData = [];
 
     if (!bboxData || !bboxData.min || !bboxData.max) {
+        console.warn("Worker: Bounding box data not provided. Cannot slice.");
         return slicesData;
     }
 
@@ -34,19 +32,18 @@ function getSliceSegments(positionArray, bboxData, heightStep, currentSliceVal, 
     let min, max;
     
     // Determine the axis and min/max bounds based on the slicing plane
-    // Apply scaling to the bounding box values
     if (plane === "Z") {
         axis = "z";
-        min = bboxData.min[2] * scaleZ; // Z-axis scaled
-        max = bboxData.max[2] * scaleZ; // Z-axis scaled
+        min = bboxData.min[2]; // Z-axis
+        max = bboxData.max[2]; // Z-axis
     } else if (plane === "X") {
         axis = "x";
-        min = bboxData.min[0] * scaleX; // X-axis scaled
-        max = bboxData.max[0] * scaleX; // X-axis scaled
+        min = bboxData.min[0]; // X-axis
+        max = bboxData.max[0]; // X-axis
     } else { // Y plane
         axis = "y";
-        min = bboxData.min[1] * scaleY; // Y-axis scaled
-        max = bboxData.max[1] * scaleY; // Y-axis scaled
+        min = bboxData.min[1]; // Y-axis
+        max = bboxData.max[1]; // Y-axis
     }
 
     const valuesToSlice =
@@ -62,10 +59,9 @@ function getSliceSegments(positionArray, bboxData, heightStep, currentSliceVal, 
         const segmentsForCurrentSlice = [];
 
         for (let i = 0; i < positionArray.length; i += 9) { // 9 components per triangle (3 vertices * 3 components/vertex)
-            // Apply scaling to each vertex before using it for intersection
-            p1.set(positionArray[i] * scaleX, positionArray[i + 1] * scaleY, positionArray[i + 2] * scaleZ);
-            p2.set(positionArray[i + 3] * scaleX, positionArray[i + 4] * scaleY, positionArray[i + 5] * scaleZ);
-            p3.set(positionArray[i + 6] * scaleX, positionArray[i + 7] * scaleY, positionArray[i + 8] * scaleZ);
+            p1.set(positionArray[i], positionArray[i + 1], positionArray[i + 2]);
+            p2.set(positionArray[i + 3], positionArray[i + 4], positionArray[i + 5]);
+            p3.set(positionArray[i + 6], positionArray[i + 7], positionArray[i + 8]);
 
             const triangle = [p1, p2, p3];
             const currentTriangleIntersectionPoints = [];
@@ -328,10 +324,11 @@ self.onmessage = function(event) {
     const { type, payload } = event.data;
 
     if (type === 'sliceModel') {
-        const { positionArray, bboxData, sliceHeight, currentSlice, slicingPlane, scaleX, scaleY, scaleZ } = payload; // Destructure new scale params
+        const { positionArray, bboxData, sliceHeight, currentSlice, slicingPlane } = payload;
 
-        const slicesData = getSliceSegments(positionArray, bboxData, sliceHeight, currentSlice, slicingPlane, scaleX, scaleY, scaleZ);
+        const slicesData = getSliceSegments(positionArray, bboxData, sliceHeight, currentSlice, slicingPlane);
 
+        // Process slices, now configured to return raw segments directly
         const processedContours = processSlicesWithClipper(slicesData, slicingPlane);
 
         self.postMessage({ type: 'slicingComplete', payload: processedContours });
