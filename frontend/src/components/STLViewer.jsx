@@ -304,63 +304,46 @@ const exportSVG = () => {
   const lines = sceneState.scene.children.filter((c) => c.name === 'sliceLine');
   if (!lines.length) return console.log('No slices to export.');
 
-  const plane = slicingParams.slicingPlane; // 'X', 'Y', or 'Z'
+  const plane = slicingParams.slicingPlane;
   let offsetX = 0;
+  const sliceGap = 10;
+
+  let pathData = '';
   let globalMinX = Infinity;
   let globalMinY = Infinity;
   let globalMaxX = -Infinity;
   let globalMaxY = -Infinity;
-  const sliceGap = 10; // mm between slices
-
-  let pathData = '';
 
   lines.forEach((line) => {
     const pos = line.geometry.attributes.position;
-    if (!pos || !pos.count === 0) return;
+    if (!pos || pos.count === 0) return;
 
-    // --- slice-local bounds & projected 2-D points ---------------
-    let minX = Infinity,
-      maxX = -Infinity,
-      minY = Infinity,
-      maxY = -Infinity;
-    const flat = [];
-
+    // Build 2-D points once
+    const pts2D = [];
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i);
       const y = pos.getY(i);
       const z = pos.getZ(i);
+      let px, py;
+      if (plane === 'Z') { px = x; py = y; }
+      else if (plane === 'X') { px = z; py = y; }
+      else { px = x; py = z; }
 
-      let px, py; // 2-D projection
-      if (plane === 'Z') {
-        px = x;
-        py = y;
-      } else if (plane === 'X') {
-        px = z;
-        py = y;
-      } else {
-        // Y
-        px = x;
-        py = z;
-      }
-
-      flat.push(px + offsetX, -py); // SVG Y is inverted
-      minX = Math.min(minX, px);
-      maxX = Math.max(maxX, px);
-      minY = Math.min(minY, py);
-      maxY = Math.max(maxY, py);
+      pts2D.push({ x: px + offsetX, y: -py }); // SVG Y inverted
+      globalMinX = Math.min(globalMinX, px + offsetX);
+      globalMaxX = Math.max(globalMaxX, px + offsetX);
+      globalMinY = Math.min(globalMinY, -py);
+      globalMaxY = Math.max(globalMaxY, -py);
     }
 
-    if (flat.length) {
-      pathData += `<path d="M ${flat.join(' L ')}" stroke="#ff0000" stroke-width="0.2" fill="none"/>\n`;
+    // Export every pair as a separate two-point path
+    for (let i = 0; i < pts2D.length - 1; i += 2) {
+      const p1 = pts2D[i];
+      const p2 = pts2D[i + 1];
+      pathData += `<path d="M ${p1.x} ${p1.y} L ${p2.x} ${p2.y}" stroke="#ff0000" stroke-width="0.2" fill="none"/>\n`;
     }
 
-    // update global viewport
-    globalMinX = Math.min(globalMinX, offsetX + minX);
-    globalMaxX = Math.max(globalMaxX, offsetX + maxX);
-    globalMinY = Math.min(globalMinY, -maxY);
-    globalMaxY = Math.max(globalMaxY, -minY);
-
-    offsetX += maxX - minX + sliceGap;
+    offsetX += (globalMaxX - globalMinX) + sliceGap;
   });
 
   if (!pathData) return;
@@ -376,7 +359,7 @@ ${pathData}
 };
 
 /* ------------------------------------------------------------------
-   2. DXF Export – side view, one row
+   DXF Export – side view, every segment as separate two-point line
 ------------------------------------------------------------------ */
 const exportDXF = () => {
   if (!sceneState.scene) return;
@@ -393,33 +376,21 @@ const exportDXF = () => {
     const pos = line.geometry.attributes.position;
     if (!pos || pos.count === 0) return;
 
-    let minX = Infinity;
-    let maxX = -Infinity;
     const pts2D = [];
-
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i);
       const y = pos.getY(i);
       const z = pos.getZ(i);
-
       let px, py;
-      if (plane === 'Z') {
-        px = x;
-        py = y;
-      } else if (plane === 'X') {
-        px = z;
-        py = y;
-      } else {
-        px = x;
-        py = z;
-      }
+      if (plane === 'Z') { px = x; py = y; }
+      else if (plane === 'X') { px = z; py = y; }
+      else { px = x; py = z; }
 
       pts2D.push({ x: px + offsetX, y: py });
-      minX = Math.min(minX, px);
-      maxX = Math.max(maxX, px);
     }
 
-    for (let i = 0; i < pts2D.length - 1; i++) {
+    // Write every segment as separate LINE entity
+    for (let i = 0; i < pts2D.length - 1; i += 2) {
       const p1 = pts2D[i];
       const p2 = pts2D[i + 1];
       dxf +=
@@ -434,7 +405,8 @@ const exportDXF = () => {
         '\n31\n0\n';
     }
 
-    offsetX += maxX - minX + sliceGap;
+    const sliceWidth = Math.max(...pts2D.map((p) => p.x)) - Math.min(...pts2D.map((p) => p.x));
+    offsetX += sliceWidth + sliceGap;
   });
 
   dxf += '0\nENDSEC\n0\nEOF';
