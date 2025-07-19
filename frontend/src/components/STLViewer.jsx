@@ -1,455 +1,598 @@
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { STLLoader } from "three-stdlib";
 import { OrbitControls } from "three-stdlib";
 import { saveAs } from "file-saver";
-
-// --- Helper Functions (Moved outside component for stability) ---
-
-// Correct way to import a Web Worker in modern bundlers
-const SlicerWorker = new Worker(new URL('../workers/slicerWorker.js', import.meta.url));
-
-/**
- * Removes all slice line objects from a scene and disposes their resources.
- */
-const clearSlices = (scene) => {
-  const slices = scene.children.filter((child) => child.name === "sliceLine");
-  slices.forEach((line) => {
-    scene.remove(line);
-    if (line.geometry) line.geometry.dispose();
-    if (line.material) line.material.dispose();
-  });
-};
-
-/**
- * Calculates the minimum coordinate of the geometry's bounding box along a given plane, adjusted by scale.
- */
-const getScaledMinRangeValue = (geom, plane, scale) => {
-  if (!geom?.boundingBox?.min) return 0;
-  const minVal = geom.boundingBox.min[plane.toLowerCase()];
-  if (!Number.isFinite(minVal)) return 0;
-
-  if (plane === 'X') return minVal * scale.x;
-  if (plane === 'Y') return minVal * scale.y;
-  if (plane === 'Z') return minVal * scale.z;
-  return minVal;
-};
-
-/**
- * Calculates the maximum coordinate of the geometry's bounding box along a given plane, adjusted by scale.
- */
-const getScaledMaxRangeValue = (geom, plane, scale) => {
-  if (!geom?.boundingBox?.max) return 100;
-  const maxVal = geom.boundingBox.max[plane.toLowerCase()];
-  if (!Number.isFinite(maxVal)) return 100;
-
-  if (plane === 'X') return maxVal * scale.x;
-  if (plane === 'Y') return maxVal * scale.y;
-  if (plane === 'Z') return maxVal * scale.z;
-  return maxVal;
-};
-
-
-// --- React Component ---
+import * as ClipperLib from 'js-clipper';
 
 const STLViewer = ({ stlFile }) => {
-  // --- Refs for Three.js objects ---
+  // --- 1. Model and Geometry State ---
   const mountRef = useRef(null);
-  const sceneRef = useRef(null);
-  const rendererRef = useRef(null);
-  const cameraRef = useRef(null);
-  const controlsRef = useRef(null);
-  const workerInstanceRef = useRef(null);
-
-  // --- React State ---
+  const [sceneState, setSceneState] = useState({ scene: null, renderer: null, camera: null, controls: null });
   const [geometry, setGeometry] = useState(null);
-  const [originalDimensions, setOriginalDimensions] = useState({ x: 0, y: 0, z: 0 });
-  const [targetDimensions, setTargetDimensions] = useState({ width: 0, height: 0, depth: 0 });
-  const [currentScale, setCurrentScale] = useState({ x: 1, y: 1, z: 1 });
 
+  // --- 3. Slicing Logic State ---
   const [slicingParams, setSlicingParams] = useState({
     sliceHeight: 2,
     showSlices: true,
-    currentLayerIndex: 0,
-    currentSliceValue: 0,
+    currentSlice: 0,
     singleSliceMode: false,
     slicingPlane: "Z",
   });
-  const [debouncedSlicingParams, setDebouncedSlicingParams] = useState(slicingParams);
 
-  const [showModelOutline, setShowModelOutline] = useState(true);
-  const [showMiddleSlice, setShowMiddleSlice] = useState(false);
-
-  // --- Web Worker Initialization and Message Handling ---
-  useEffect(() => {
-    workerInstanceRef.current = SlicerWorker;
-    workerInstanceRef.current.onmessage = (event) => {
-      const { type, payload } = event.data;
-      if (type === 'slicingComplete' && sceneRef.current) {
-        clearSlices(sceneRef.current);
-
-        payload.forEach(sliceData => {
-          const { contours, isFallback } = sliceData;
-          if (contours.length === 0) return;
-
-          const materialColor = isFallback ? 0x00ff00 : 0xff0000;
-          const sliceMaterial = new THREE.LineBasicMaterial({ color: materialColor });
-          const sliceGeometry = new THREE.BufferGeometry();
-          sliceGeometry.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(contours), 3));
-          
-          const sliceLine = new THREE.LineSegments(sliceGeometry, sliceMaterial);
-          sliceLine.name = "sliceLine";
-          sceneRef.current.add(sliceLine);
-        });
-      }
-    };
-  }, []); // Empty dependency array ensures this runs only once
-
-  // --- Debounce Slicing Parameters ---
-  useEffect(() => {
-    const handler = setTimeout(() => {
-      setDebouncedSlicingParams(slicingParams);
-    }, 200);
-    return () => clearTimeout(handler);
-  }, [slicingParams]);
-
-
-  // --- UI Controls Handlers ---
-  const handleSliceHeightChange = useCallback((e) => {
-    setSlicingParams(p => ({
+  // --- 4. UI Controls Handlers ---
+  const handleSliceHeightChange = (e) => {
+    setSlicingParams((p) => ({
       ...p,
-      sliceHeight: parseFloat(e.target.value) || 0.1,
-      singleSliceMode: false, // Reset dependent modes
-      currentLayerIndex: 0,
+      sliceHeight: parseFloat(e.target.value),
+      singleSliceMode: false,
     }));
-    setShowMiddleSlice(false);
-  }, []);
+  };
 
-  const handlePlaneChange = useCallback((e) => {
-    setSlicingParams(p => ({
+  const handlePlaneChange = (e) => {
+    setSlicingParams((p) => ({
       ...p,
       slicingPlane: e.target.value,
-      singleSliceMode: false, // Reset dependent modes
-      currentLayerIndex: 0,
+      singleSliceMode: false,
     }));
-    setShowMiddleSlice(false);
-  }, []);
+  };
 
-  const handleToggleSlices = useCallback(() => {
-    setSlicingParams(p => ({ ...p, showSlices: !p.showSlices }));
-  }, []);
+  const handleToggleSlices = () => {
+    setSlicingParams((p) => ({ ...p, showSlices: !p.showSlices }));
+  };
 
-  const handleStepChange = useCallback((e) => {
-    if (!geometry?.boundingBox) return;
-
-    const newLayerIndex = parseInt(e.target.value, 10);
-    const scaledMin = getScaledMinRangeValue(geometry, slicingParams.slicingPlane, currentScale);
-    const calculatedSliceValue = scaledMin + newLayerIndex * slicingParams.sliceHeight;
-
-    setSlicingParams(p => ({
+  const handleStepChange = (e) => {
+    setSlicingParams((p) => ({
       ...p,
-      currentLayerIndex: newLayerIndex,
-      currentSliceValue: calculatedSliceValue,
+      currentSlice: parseFloat(e.target.value),
       singleSliceMode: true,
       showSlices: true,
     }));
-    setShowMiddleSlice(false);
-  }, [geometry, slicingParams.sliceHeight, slicingParams.slicingPlane, currentScale]);
+  };
 
-  const handleToggleSingleSliceMode = useCallback(() => {
-    setSlicingParams(p => ({ ...p, singleSliceMode: !p.singleSliceMode }));
-    setShowMiddleSlice(false);
-  }, []);
-  
-  const handleToggleModelOutline = useCallback(() => {
-    setShowModelOutline(prev => !prev);
-  }, []);
+  const handleToggleSingleSliceMode = () => {
+    setSlicingParams((p) => ({
+      ...p,
+      singleSliceMode: !p.singleSliceMode,
+    }));
+  };
 
-  const handleToggleMiddleSlice = useCallback(() => {
-    setShowMiddleSlice(prev => {
-        const isShowingMiddle = !prev;
-        if (isShowingMiddle) {
-            setSlicingParams(p => ({
-                ...p,
-                singleSliceMode: false, // Ensure single slice is off
-                showSlices: true,
-            }));
-        }
-        return isShowingMiddle;
-    });
-  }, []);
-  
-  const handleTargetDimensionChange = useCallback((dimension) => (e) => {
-    const inputValue = parseFloat(e.target.value);
-    if (isNaN(inputValue)) return;
-
-    // Check if original dimensions are valid for proportional scaling
-    const canScaleProportionally = 
-        originalDimensions.x > 0 &&
-        originalDimensions.y > 0 &&
-        originalDimensions.z > 0;
-
-    if (!canScaleProportionally) {
-        setTargetDimensions(prev => ({...prev, [dimension]: inputValue }));
-        return;
-    }
-
-    let scaleFactor = 1;
-    if (dimension === 'width') scaleFactor = inputValue / originalDimensions.x;
-    else if (dimension === 'height') scaleFactor = inputValue / originalDimensions.y;
-    else if (dimension === 'depth') scaleFactor = inputValue / originalDimensions.z;
-
-    setTargetDimensions({
-      width: originalDimensions.x * scaleFactor,
-      height: originalDimensions.y * scaleFactor,
-      depth: originalDimensions.z * scaleFactor,
-    });
-  }, [originalDimensions]);
-
-
-  // --- Three.js Scene Initialization (Runs only once) ---
+  // --- 2. Scene Setup and Render ---
   useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return;
 
-    while (mount.firstChild) mount.removeChild(mount.firstChild);
+    while (mount.firstChild) {
+      mount.removeChild(mount.firstChild);
+    }
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x1a1a1a);
+
     const camera = new THREE.PerspectiveCamera(75, mount.clientWidth / mount.clientHeight, 0.1, 1000);
+    camera.position.set(0, 0, 100);
+
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     mount.appendChild(renderer.domElement);
+
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    
+    controls.dampingFactor = 0.05;
+
     scene.add(new THREE.AmbientLight(0xffffff, 0.6));
     const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
     directionalLight.position.set(50, 50, 100).normalize();
     scene.add(directionalLight);
 
-    sceneRef.current = scene;
-    rendererRef.current = renderer;
-    cameraRef.current = camera;
-    controlsRef.current = controls;
-
     const handleResize = () => {
-      if (cameraRef.current && rendererRef.current && mountRef.current) {
-        cameraRef.current.aspect = mountRef.current.clientWidth / mountRef.current.clientHeight;
-        cameraRef.current.updateProjectionMatrix();
-        rendererRef.current.setSize(mountRef.current.clientWidth, mountRef.current.clientHeight);
+      if (mount) {
+        camera.aspect = mount.clientWidth / mount.clientHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(mount.clientWidth, mount.clientHeight);
       }
     };
     window.addEventListener("resize", handleResize);
 
-    let animationFrameId;
     const animate = () => {
-      animationFrameId = requestAnimationFrame(animate);
-      controlsRef.current.update();
-      rendererRef.current.render(sceneRef.current, cameraRef.current);
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
     };
     animate();
 
+    setSceneState({ scene, renderer, camera, controls });
+
     return () => {
       window.removeEventListener("resize", handleResize);
-      cancelAnimationFrame(animationFrameId);
-      controlsRef.current.dispose();
-      rendererRef.current.dispose();
+      controls.dispose();
+      renderer.dispose();
     };
   }, []);
 
-  // --- STL File Loading and Scene Setup ---
+  // --- 1. STL Loader & Mesh Setup ---
   useEffect(() => {
-    if (!sceneRef.current || !stlFile) return;
-
-    // Clear previous model and slices
-    const existingMesh = sceneRef.current.getObjectByName("stlMesh");
-    if (existingMesh) sceneRef.current.remove(existingMesh);
-    const existingOutline = sceneRef.current.getObjectByName("modelOutline");
-    if (existingOutline) sceneRef.current.remove(existingOutline);
-    clearSlices(sceneRef.current);
+    if (!sceneState.scene || !stlFile) return;
 
     const loader = new STLLoader();
     loader.load(stlFile, (loadedGeometry) => {
       loadedGeometry.computeBoundingBox();
-      const initialSize = new THREE.Vector3();
-      loadedGeometry.boundingBox.getSize(initialSize);
-
       setGeometry(loadedGeometry);
-      setOriginalDimensions({ x: initialSize.x, y: initialSize.y, z: initialSize.z });
-      setTargetDimensions({ width: initialSize.x, height: initialSize.y, depth: initialSize.z });
-      
+
       const material = new THREE.MeshPhongMaterial({ color: 0x00aaff });
       const mesh = new THREE.Mesh(loadedGeometry, material);
-      mesh.name = "stlMesh";
 
-      const outline = new THREE.LineSegments(
-          new THREE.EdgesGeometry(loadedGeometry, 30),
-          new THREE.LineBasicMaterial({ color: 0x000000, linewidth: 2 })
-      );
-      outline.name = "modelOutline";
-
-      const group = new THREE.Group();
-      group.add(mesh);
-      group.add(outline);
-      
       const center = new THREE.Vector3();
       loadedGeometry.boundingBox.getCenter(center);
-      group.position.sub(center); // Center the whole group
-      sceneRef.current.add(group);
-      
-      // Reset camera to fit new model
-      if (cameraRef.current && controlsRef.current) {
-        const maxDim = Math.max(initialSize.x, initialSize.y, initialSize.z);
-        const fov = cameraRef.current.fov * (Math.PI / 180);
-        let cameraZ = Math.abs(maxDim / Math.tan(fov / 2));
-        cameraZ *= 1.2; // Zoom out a bit
-        cameraRef.current.position.set(0, 0, cameraZ);
-        controlsRef.current.target.set(0,0,0);
-        controlsRef.current.update();
+      mesh.position.sub(center);
+      mesh.name = "stlMesh";
+
+      const scene = sceneState.scene;
+      const existing = scene.getObjectByName("stlMesh");
+      if (existing) {
+        scene.remove(existing);
+        if (existing.geometry) existing.geometry.dispose();
+        if (existing.material) existing.material.dispose();
       }
-    }, undefined, (error) => console.error("Error loading STL file:", error));
-  }, [stlFile]);
+      scene.add(mesh);
 
-  // --- Model Scaling ---
-  useEffect(() => {
-    const group = sceneRef.current?.getObjectByName("stlMesh")?.parent;
-    if (!group || originalDimensions.x === 0) return;
+      if (sceneState.camera && sceneState.controls) {
+        const size = new THREE.Vector3();
+        loadedGeometry.boundingBox.getSize(size);
+        const maxDim = Math.max(size.x, size.y, size.z);
+        const fov = sceneState.camera.fov * (Math.PI / 180);
+        let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
+        cameraZ *= 1.5;
+        sceneState.camera.position.set(center.x, center.y, center.z + cameraZ);
+        sceneState.camera.lookAt(center);
+        sceneState.controls.target.copy(center);
+        sceneState.controls.update();
+      }
 
-    const newScaleX = targetDimensions.width / originalDimensions.x;
-    const newScaleY = targetDimensions.height / originalDimensions.y;
-    const newScaleZ = targetDimensions.depth / originalDimensions.z;
-
-    group.scale.set(newScaleX, newScaleY, newScaleZ);
-    setCurrentScale({ x: newScaleX, y: newScaleY, z: newScaleZ });
-    
-    // Reset slicing when scale changes
-    setSlicingParams(p => ({ ...p, currentLayerIndex: 0 }));
-    setShowMiddleSlice(false);
-
-  }, [targetDimensions, originalDimensions]);
-
-
-  // --- Model and Slices Visibility ---
-  useEffect(() => {
-    if (!sceneRef.current) return;
-    const outline = sceneRef.current.getObjectByName("modelOutline");
-    if (outline) outline.visible = showModelOutline;
-
-    sceneRef.current.children.filter(c => c.name === 'sliceLine').forEach(line => {
-      line.visible = slicingParams.showSlices;
+      clearSlices(scene);
+      if (slicingParams.showSlices) {
+         let sliceValueToRender = null;
+         if (slicingParams.singleSliceMode) {
+           sliceValueToRender = slicingParams.currentSlice;
+         }
+         const segments = getSliceSegments(
+           loadedGeometry,
+           slicingParams.sliceHeight,
+           sliceValueToRender,
+           slicingParams.slicingPlane
+         );
+         renderSlicesWithClipper(segments, scene, slicingParams.slicingPlane);
+      }
+    },
+    undefined,
+    (error) => {
+      console.error("Error loading STL file:", error);
+      alert("Error loading STL file. Please check the file and try again.");
     });
-  }, [showModelOutline, slicingParams.showSlices]);
-  
-  
-  // --- Send Slicing Request to Worker ---
+  }, [stlFile, sceneState.scene, sceneState.camera, sceneState.controls, slicingParams.singleSliceMode, slicingParams.currentSlice, slicingParams.sliceHeight, slicingParams.slicingPlane, slicingParams.showSlices]);
+
+  // --- Re-slice when slicingParams change (if geometry exists) ---
   useEffect(() => {
-    if (!geometry || !workerInstanceRef.current) return;
+    if (geometry && sceneState.scene) {
+      clearSlices(sceneState.scene);
+      if (slicingParams.showSlices) {
+        let sliceValueToRender = null;
+        if (slicingParams.singleSliceMode) {
+          sliceValueToRender = slicingParams.currentSlice;
+        }
+        const segments = getSliceSegments(
+          geometry,
+          slicingParams.sliceHeight,
+          sliceValueToRender,
+          slicingParams.slicingPlane
+        );
+        renderSlicesWithClipper(segments, sceneState.scene, slicingParams.slicingPlane);
+      }
+    }
+  }, [slicingParams.sliceHeight, slicingParams.showSlices, slicingParams.currentSlice, slicingParams.singleSliceMode, slicingParams.slicingPlane, geometry, sceneState.scene]);
 
-    clearSlices(sceneRef.current);
-      
-    let sliceValueToRender = null;
-    let showSlicesForWorker = debouncedSlicingParams.showSlices;
+  // --- 6. Utility Functions ---
+  const clearSlices = (scene) => {
+    const slices = scene.children.filter((child) => child.name === "sliceLine");
+    slices.forEach((line) => {
+      scene.remove(line);
+      if (line.geometry) line.geometry.dispose();
+      if (line.material) line.material.dispose();
+    });
+  };
 
-    if (showMiddleSlice && geometry.boundingBox) {
-      const bboxMin = getScaledMinRangeValue(geometry, debouncedSlicingParams.slicingPlane, currentScale);
-      const bboxMax = getScaledMaxRangeValue(geometry, debouncedSlicingParams.slicingPlane, currentScale);
-      sliceValueToRender = (bboxMin + bboxMax) / 2;
-      showSlicesForWorker = true;
-    } else if (debouncedSlicingParams.singleSliceMode) {
-      sliceValueToRender = debouncedSlicingParams.currentSliceValue;
+  /**
+   * getSliceSegments
+   * Extracts raw intersection points (segments) for each slice plane.
+   * This function focuses only on finding the intersections, not on contour reconstruction.
+   * @param {THREE.BufferGeometry} geometry The geometry to slice.
+   * @param {number} heightStep The height between slices.
+   * @param {number | null} currentSliceVal If not null, only slice at this specific value.
+   * @param {'X' | 'Y' | 'Z'} plane The slicing plane (e.g., 'Z' for XY slices).
+   * @returns {Array<{ value: number, segments: Array<Array<THREE.Vector3>> }>} An array of objects,
+   * each containing the slice plane value and its raw segments.
+   */
+  const getSliceSegments = (geometry, heightStep, currentSliceVal, plane) => {
+    const pos = geometry.attributes.position;
+    const bbox = geometry.boundingBox;
+    const slicesData = [];
+
+    if (!bbox) {
+      console.warn("Bounding box not computed for geometry. Cannot slice.");
+      return slicesData;
     }
 
-    if (showSlicesForWorker) {
-      workerInstanceRef.current.postMessage({
-        type: 'sliceModel',
-        payload: {
-          positionArray: geometry.attributes.position.array,
-          bboxData: { min: geometry.boundingBox.min.toArray(), max: geometry.boundingBox.max.toArray() },
-          sliceHeight: debouncedSlicingParams.sliceHeight,
-          currentSlice: sliceValueToRender,
-          slicingPlane: debouncedSlicingParams.slicingPlane,
-          scale: currentScale,
+    let axis;
+    let min, max;
+    if (plane === "Z") {
+      axis = "z";
+      min = bbox.min.z;
+      max = bbox.max.z;
+    } else if (plane === "X") {
+      axis = "x";
+      min = bbox.min.x;
+      max = bbox.max.x;
+    } else {
+      axis = "y";
+      min = bbox.min.y;
+      max = bbox.max.y;
+    }
+
+    const valuesToSlice =
+      currentSliceVal !== null
+        ? [currentSliceVal]
+        : Array.from({ length: Math.floor((max - min) / heightStep) + 1 }, (_, i) => min + i * heightStep);
+
+    const p1 = new THREE.Vector3();
+    const p2 = new THREE.Vector3();
+    const p3 = new THREE.Vector3();
+
+    const epsilon = 1e-6; // Epsilon for floating point comparisons
+
+    valuesToSlice.forEach((value) => {
+      const segmentsForCurrentSlice = [];
+
+      for (let i = 0; i < pos.count; i += 3) {
+        p1.fromBufferAttribute(pos, i);
+        p2.fromBufferAttribute(pos, i + 1);
+        p3.fromBufferAttribute(pos, i + 2);
+
+        const triangle = [p1, p2, p3];
+        const currentTriangleIntersectionPoints = [];
+
+        for (let j = 0; j < 3; j++) {
+          const v1 = triangle[j];
+          const v2 = triangle[(j + 1) % 3];
+
+          const val1 = v1[axis];
+          const val2 = v2[axis];
+
+          if (
+            (val1 <= value + epsilon && val2 >= value - epsilon) ||
+            (val2 <= value + epsilon && val1 >= value - epsilon)
+          ) {
+            if (Math.abs(val2 - val1) < epsilon) { // Edge is co-planar or degenerate
+              continue;
+            }
+
+            const t = (value - val1) / (val2 - val1);
+            const intersectPoint = new THREE.Vector3().lerpVectors(v1, v2, t);
+            currentTriangleIntersectionPoints.push(intersectPoint);
+          }
+        }
+
+        if (currentTriangleIntersectionPoints.length === 2) {
+          // Filter out degenerate segments (points too close)
+          if (currentTriangleIntersectionPoints[0].distanceTo(currentTriangleIntersectionPoints[1]) > epsilon) {
+            segmentsForCurrentSlice.push(currentTriangleIntersectionPoints);
+          }
+        }
+      }
+      if (segmentsForCurrentSlice.length > 0) {
+        slicesData.push({ value: value, segments: segmentsForCurrentSlice });
+      }
+    });
+    return slicesData;
+  };
+
+  /**
+   * renderSlicesWithClipper
+   * Renders the slice contours using js-clipper for robust polygon reconstruction.
+   * @param {Array<{ value: number, segments: Array<Array<THREE.Vector3>> }>} slicesData Data for each slice plane.
+   * @param {THREE.Scene} scene The Three.js scene to add lines to.
+   * @param {'X' | 'Y' | 'Z'} plane The slicing plane, used for projection.
+   */
+  const renderSlicesWithClipper = (slicesData, scene, plane) => {
+    const CL_SCALE = 10000000; // Increased scale factor for ClipperLib (10 million)
+
+    slicesData.forEach(sliceData => {
+      const { value: slicePlaneValue, segments: rawSegments } = sliceData;
+
+      const clipper = new ClipperLib.Clipper();
+      const subjectPaths = new ClipperLib.Paths();
+
+      rawSegments.forEach(segment => {
+        const p1 = segment[0];
+        const p2 = segment[1];
+
+        let x1, y1, x2, y2;
+
+        if (plane === "Z") {
+          x1 = p1.x; y1 = p1.y;
+          x2 = p2.x; y2 = p2.y;
+        } else if (plane === "X") {
+          x1 = p1.y; y1 = p1.z;
+          x2 = p2.y; y2 = p2.z;
+        } else { // Y plane
+          x1 = p1.x; y1 = p1.z;
+          x2 = p2.x; y2 = p2.z;
+        }
+
+        const intP1 = { X: Math.round(x1 * CL_SCALE), Y: Math.round(y1 * CL_SCALE) };
+        const intP2 = { X: Math.round(x2 * CL_SCALE), Y: Math.round(y2 * CL_SCALE) };
+
+        // ClipperLib.AddPath expects a single path. Each segment is treated as a path.
+        const path = new ClipperLib.Path();
+        path.push(intP1);
+        path.push(intP2);
+        subjectPaths.push(path);
+      });
+
+      const solutionPolyTree = new ClipperLib.PolyTree();
+      try {
+        const success = clipper.Execute(
+          ClipperLib.ClipType.ctUnion,
+          solutionPolyTree,
+          ClipperLib.PolyFillType.pftNonZero,
+          ClipperLib.PolyFillType.pftNonZero
+        );
+
+        if (!success) {
+          console.warn(`ClipperLib Execute failed for slice at value: ${slicePlaneValue}. Input segments:`, rawSegments);
+          // Optionally, if ClipperLib fails, you might fall back to rendering raw segments for this slice
+          // or simply skip rendering this slice. For now, it will just warn and skip.
+          return;
+        }
+      } catch (e) {
+        console.error(`ClipperLib threw an error for slice at value: ${slicePlaneValue}. Error:`, e, 'Input segments:', rawSegments);
+        return;
+      }
+
+
+      const solutionPaths = ClipperLib.Clipper.PolyTreeToPaths(solutionPolyTree);
+
+      solutionPaths.forEach(path => {
+        if (path.length < 2) return;
+
+        const threeJsPoints = [];
+        path.forEach(intPoint => {
+          const x = intPoint.X / CL_SCALE;
+          const y = intPoint.Y / CL_SCALE;
+
+          let threeDPoint;
+          if (plane === "Z") {
+            threeDPoint = new THREE.Vector3(x, y, slicePlaneValue);
+          } else if (plane === "X") {
+            threeDPoint = new THREE.Vector3(slicePlaneValue, x, y);
+          } else {
+            threeDPoint = new THREE.Vector3(x, slicePlaneValue, y);
+          }
+          threeJsPoints.push(threeDPoint);
+        });
+
+        if (threeJsPoints.length > 1) {
+          const sliceGeometry = new THREE.BufferGeometry().setFromPoints(threeJsPoints.concat(threeJsPoints[0]));
+          const sliceMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 });
+          const sliceLine = new THREE.LineLoop(sliceGeometry, sliceMaterial);
+          sliceLine.name = "sliceLine";
+          scene.add(sliceLine);
         }
       });
-    }
-  }, [debouncedSlicingParams, geometry, showMiddleSlice, currentScale]);
+    });
+  };
 
-  // --- Export Functions ---
-  const exportSVG = () => { /* ... unchanged ... */ };
-  const exportDXF = () => { /* ... unchanged ... */ };
+  // --- 5. Export Functions ---
+  const exportSVG = () => {
+    if (!sceneState.scene) return;
+    const lines = sceneState.scene.children.filter((child) => child.name === "sliceLine");
+    if (lines.length === 0) return alert("No slices to export.");
 
-  // --- Calculated Values for UI ---
-  const minRangeValue = getScaledMinRangeValue(geometry, slicingParams.slicingPlane, currentScale);
-  const maxRangeValue = getScaledMaxRangeValue(geometry, slicingParams.slicingPlane, currentScale);
-  const range = maxRangeValue - minRangeValue;
-  const totalLayers = range > 0 && slicingParams.sliceHeight > 0 ? Math.floor(range / slicingParams.sliceHeight) + 1 : 0;
-  
-  const currentLayerIndex = Math.max(0, Math.min(totalLayers > 0 ? totalLayers - 1 : 0, slicingParams.currentLayerIndex));
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+    let svgPaths = "";
+    lines.forEach((line) => {
+      const pos = line.geometry.attributes.position;
+      let pathD = "";
+      for (let i = 0; i < pos.count; i++) {
+        const x = pos.getX(i);
+        const y = pos.getY(i);
+        const z = pos.getZ(i);
+
+        let px, py;
+        if (slicingParams.slicingPlane === "Z") {
+          px = x;
+          py = y;
+        } else if (slicingParams.slicingPlane === "X") {
+          px = z;
+          py = y;
+        } else {
+          px = x;
+          py = z;
+        }
+
+        minX = Math.min(minX, px);
+        minY = Math.min(minY, py);
+        maxX = Math.max(maxX, px);
+        maxY = Math.max(maxY, py);
+
+        pathD += i === 0 ? `M ${px.toFixed(3)} ${(-py).toFixed(3)}` : ` L ${px.toFixed(3)} ${(-py).toFixed(3)}`;
+      }
+      pathD += " Z";
+
+      svgPaths += `<path d="${pathD}" stroke="red" stroke-width="0.05" fill="none"/>`;
+    });
+
+    const viewBoxString = `${minX.toFixed(3)} ${(-maxY).toFixed(3)} ${(maxX - minX).toFixed(3)} ${(maxY - minY).toFixed(3)}`;
+
+    const svgContent = `<?xml version="1.0" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="${viewBoxString}">
+${svgPaths}
+</svg>`;
+
+    const blob = new Blob([svgContent], { type: "image/svg+xml" });
+    saveAs(blob, "slice.svg");
+  };
+
+  const exportDXF = () => {
+    if (!sceneState.scene) return;
+    const lines = sceneState.scene.children.filter((child) => child.name === "sliceLine");
+    if (lines.length === 0) return alert("No slices to export.");
+
+    let dxfContent = "0\nSECTION\n2\nENTITIES\n";
+    lines.forEach((line) => {
+      const pos = line.geometry.attributes.position;
+      for (let i = 0; i < pos.count; i++) {
+        const p1x = pos.getX(i);
+        const p1y = pos.getY(i);
+        const p1z = pos.getZ(i);
+
+        const nextIndex = (i + 1) % pos.count;
+        const p2x = pos.getX(nextIndex);
+        const p2y = pos.getY(nextIndex);
+        const p2z = pos.getZ(nextIndex);
+
+        let dx1, dy1, dz1;
+        let dx2, dy2, dz2;
+
+        if (slicingParams.slicingPlane === "Z") {
+          dx1 = p1x; dy1 = p1y; dz1 = 0;
+          dx2 = p2x; dy2 = p2y; dz2 = 0;
+        } else if (slicingParams.slicingPlane === "X") {
+          dx1 = p1z; dy1 = p1y; dz1 = 0;
+          dx2 = p2z; dy2 = p2y; dz2 = 0;
+        } else {
+          dx1 = p1x; dy1 = p1z; dz1 = 0;
+          dx2 = p2x; dy2 = p2z; dz2 = 0;
+        }
+
+        dxfContent +=
+          `0\nLINE\n8\n0\n10\n${dx1.toFixed(3)}\n20\n${dy1.toFixed(3)}\n30\n${dz1.toFixed(3)}\n11\n${dx2.toFixed(3)}\n21\n${dy2.toFixed(3)}\n31\n${dz2.toFixed(3)}\n`;
+      }
+    });
+    dxfContent += "0\nENDSEC\n0\nEOF";
+
+    const blob = new Blob([dxfContent], { type: "application/dxf" });
+    saveAs(blob, "slice.dxf");
+  };
+
+  const minRangeValue = geometry && geometry.boundingBox
+    ? geometry.boundingBox.min[slicingParams.slicingPlane.toLowerCase()]
+    : 0;
+
+  const maxRangeValue = geometry && geometry.boundingBox
+    ? geometry.boundingBox.max[slicingParams.slicingPlane.toLowerCase()]
+    : 100;
+
+  let totalLayers = 0;
+  let currentLayerIndex = 0;
+  let modelDimensions = { x: 0, y: 0, z: 0 };
+
+  if (geometry && geometry.boundingBox && slicingParams.sliceHeight > 0) {
+    const range = maxRangeValue - minRangeValue;
+    totalLayers = Math.floor(range / slicingParams.sliceHeight) + 1;
+
+    const clampedCurrentSlice = Math.max(minRangeValue, Math.min(maxRangeValue, slicingParams.currentSlice));
+    currentLayerIndex = Math.floor((clampedCurrentSlice - minRangeValue) / slicingParams.sliceHeight);
+    currentLayerIndex = Math.max(0, Math.min(totalLayers - 1, currentLayerIndex));
+
+    const size = new THREE.Vector3();
+    geometry.boundingBox.getSize(size);
+    modelDimensions = {
+      x: size.x.toFixed(2),
+      y: size.y.toFixed(2),
+      z: size.z.toFixed(2),
+    };
+  }
 
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100vh', overflow: 'hidden' }}>
-      <div style={{ padding: 10, background: '#282c34', color: 'white', borderBottom: '1px solid #444', zIndex: 10, display: 'flex', flexWrap: 'wrap', gap: '10px 20px', alignItems: 'center' }}>
-        {/* --- Controls --- */}
+    <div>
+      <div style={{ padding: 10, background: '#282c34', color: 'white', borderBottom: '1px solid #444' }}>
         <label>
           Slice Height:
-          <input type="number" step="0.1" min="0.1" value={slicingParams.sliceHeight} onChange={handleSliceHeightChange} style={{ marginLeft: 5, width: 60 }}/>
+          <input
+            type="number"
+            step="0.1"
+            min="0.1"
+            value={slicingParams.sliceHeight}
+            onChange={handleSliceHeightChange}
+            style={{ marginLeft: 5, width: 60, padding: 3 }}
+          />
         </label>
-        <label>
+
+        <label style={{ marginLeft: 20 }}>
+          <input
+            type="checkbox"
+            checked={slicingParams.showSlices}
+            onChange={handleToggleSlices}
+            style={{ marginRight: 5 }}
+          />
+          Show Slices
+        </label>
+
+        <label style={{ marginLeft: 20 }}>
           Plane:
-          <select value={slicingParams.slicingPlane} onChange={handlePlaneChange} style={{ marginLeft: 5 }}>
+          <select value={slicingParams.slicingPlane} onChange={handlePlaneChange} style={{ marginLeft: 5, padding: 3 }}>
             <option value="Z">Z</option>
             <option value="X">X</option>
             <option value="Y">Y</option>
           </select>
         </label>
-        <label><input type="checkbox" checked={slicingParams.showSlices} onChange={handleToggleSlices}/>Show Slices</label>
-        <label><input type="checkbox" checked={showModelOutline} onChange={handleToggleModelOutline}/>Show Outline</label>
-        <label><input type="checkbox" checked={showMiddleSlice} onChange={handleToggleMiddleSlice}/>Middle Slice</label>
-        <label><input type="checkbox" checked={slicingParams.singleSliceMode} onChange={handleToggleSingleSliceMode} disabled={showMiddleSlice}/>Single Slice</label>
 
-        <label style={{ opacity: slicingParams.singleSliceMode && !showMiddleSlice ? 1 : 0.5 }}>
-          Layer:
+        <label style={{ marginLeft: 20 }}>
+          <input
+            type="checkbox"
+            checked={slicingParams.singleSliceMode}
+            onChange={handleToggleSingleSliceMode}
+            style={{ marginRight: 5 }}
+          />
+          Single Slice Mode
+        </label>
+
+        <label style={{ marginLeft: 10, opacity: slicingParams.singleSliceMode ? 1 : 0.5 }}>
+          Slice Position:
           <input
             type="range"
-            min={0}
-            max={totalLayers > 0 ? totalLayers - 1 : 0}
-            step="1"
-            value={currentLayerIndex}
+            min={minRangeValue}
+            max={maxRangeValue}
+            step="0.1"
+            value={slicingParams.currentSlice}
             onChange={handleStepChange}
-            disabled={!slicingParams.singleSliceMode || totalLayers <= 1 || showMiddleSlice}
-            style={{ marginLeft: 5, width: 150, verticalAlign: 'middle' }}
+            disabled={!geometry || !slicingParams.singleSliceMode}
+            style={{ marginLeft: 5, width: 150 }}
           />
-          <span style={{ marginLeft: 5 }}>{slicingParams.currentSliceValue.toFixed(2)}</span>
-        </label>
-        
-        {/* --- Dimensions --- */}
-        <label>
-            Width:
-            <input type="number" step="0.1" min="0" value={targetDimensions.width} onChange={handleTargetDimensionChange('width')} style={{ marginLeft: 5, width: 80 }}/>
-        </label>
-        <label>
-            Height:
-            <input type="number" step="0.1" min="0" value={targetDimensions.height} onChange={handleTargetDimensionChange('height')} style={{ marginLeft: 5, width: 80 }}/>
-        </label>
-        <label>
-            Depth:
-            <input type="number" step="0.1" min="0" value={targetDimensions.depth} onChange={handleTargetDimensionChange('depth')} style={{ marginLeft: 5, width: 80 }}/>
+          <span style={{ marginLeft: 5 }}>{slicingParams.currentSlice.toFixed(2)}</span>
         </label>
 
         {geometry && (
-            <span style={{ fontSize: '0.9em' }}>
-                Layers: {totalLayers} | Dimensions (mm): W: {targetDimensions.width.toFixed(2)} H: {targetDimensions.height.toFixed(2)} D: {targetDimensions.depth.toFixed(2)}
+          <>
+            <span style={{ marginLeft: 20, fontSize: '0.9em' }}>
+              Total Layers: {totalLayers} | Current Layer: {currentLayerIndex + 1}
             </span>
+            <span style={{ marginLeft: 20, fontSize: '0.9em' }}>
+              Dimensions (mm): L {modelDimensions.x} W {modelDimensions.y} H {modelDimensions.z}
+            </span>
+          </>
         )}
 
-        <button onClick={exportSVG} style={{ marginLeft: 'auto' }}>Export SVG</button>
-        <button onClick={exportDXF}>Export DXF</button>
+        <button onClick={exportSVG} style={{ marginLeft: 20, padding: '5px 10px', cursor: 'pointer' }}>
+          Export SVG
+        </button>
+        <button onClick={exportDXF} style={{ marginLeft: 10, padding: '5px 10px', cursor: 'pointer' }}>
+          Export DXF
+        </button>
       </div>
-      <div ref={mountRef} style={{ width: "100%", height: "calc(100vh - 70px)" }} />
+      <div ref={mountRef} style={{ width: "100%", height: "calc(100vh - 50px)" }} />
     </div>
   );
 };
-
-export default STLViewer;
